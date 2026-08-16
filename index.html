@@ -46,6 +46,14 @@
 </header>
 <main>
   <div id="out"></div>
+  <details id="hintBox">
+    <summary>晒しポストを貼り付けて照合(ヒント該当台 × 実データ)</summary>
+    <p class="note">晒屋のXポストを貼ると、機種名・メーカー名(Sammy等は機種群に展開)・台番・末尾を解読して、表示中のデータと突き合わせます。</p>
+    <textarea id="hintText" placeholder="8/17&#10;ガーデン川口安行&#10;✅GODオススメ&#10;・カバネリ海門に必ず🌈あり ..."></textarea>
+    <button class="btn" id="hintBtn">解読して照合</button>
+    <button class="btn" id="hintClear" style="background:#555">クリア</button>
+  </details>
+  <p></p>
   <details>
     <summary>収集したJSONを貼り付けて分析(最新データをその場で見る)</summary>
     <p class="note">店内で収集ツールの「JSONをコピー」をした直後なら、ここに貼ればサイトに保存されていない最新分も分析できます。</p>
@@ -62,6 +70,47 @@ var SPECS = {
   'SネオアイムジャグラーEX-KK': [[273.1, 439.8], [271.2, 399.6], [269.7, 331.0], [266.4, 315.1], [263.2, 292.6], [268.6, 268.6]]
 };
 var MIN_GAMES_RANK = 800;
+
+// ヒント解読用(収集ブックマークレットと同一)
+var HINT_ALIASES = [
+  [/GOD|ゴッド/i, 'ミリオンゴッド'], [/カバネリ/, 'カバネリ'], [/マイジャグ/, 'マイジャグラー'],
+  [/ゴージャグ|ゴーゴージャグ/, 'ゴーゴージャグラー'], [/アイムジャグ|ネオアイム/, 'アイムジャグラー'],
+  [/ファンキー/, 'ファンキージャグラー'], [/ハッピージャグ/, 'ハッピージャグラー'],
+  [/ミスタージャグ/, 'ミスタージャグラー'], [/ウルミラ|ウルトラミラクル/, 'ウルトラミラクルジャグラー'],
+  [/北斗/, '北斗'], [/ヴァルヴレイヴ|ヴヴヴ/, 'ヴァルヴレイヴ'], [/喰種|グール/, '喰種'],
+  [/モンキーターン/, 'モンキーターン'], [/からくり/, 'からくりサーカス'], [/バジリスク|絆/, 'バジリスク'],
+  [/沖ドキ/, '沖ドキ'], [/吉宗|ヨシムネ/, '吉宗'], [/番長/, '番長'], [/乙女/, '乙女'],
+  [/モンハン|モンスターハンター/, 'モンスターハンター'], [/カイジ/, 'カイジ'], [/化物語/, '化物語'],
+  [/マギレコ|マギアレコード/, 'マギアレコード'], [/とある/, 'とある'], [/ディスクアップ|DISCUP/i, 'DISCUP'],
+  [/ストファイ|ストリートファイター|スト6/, 'ストリートファイター'], [/ハナビ|花火/, 'ハナビ'],
+  [/チバリヨ/, 'チバリヨ'], [/ヤバチバ/, 'ヤバチバ'], [/南国/, '南国育ち'], [/秘宝伝/, '秘宝伝'],
+  [/鏡|サラリーマン/, '鏡'], [/かぐや/, 'かぐや様'], [/リオ/, 'リオエース'],
+  [/東リベ|リベンジャーズ/, 'リベンジャーズ'], [/SAO|ソードアート/i, 'ソードアート'],
+  [/ビッグドリーム/, 'ビッグドリーム'], [/戦コレ|戦国コレクション/, '戦国コレクション'], [/鬼武者/, '鬼武者']
+];
+var HINT_MAKERS = {
+  'Sammy|サミー': ['北斗', 'カバネリ', 'DISCUP', 'ストリートファイター', 'ディスクアップ'],
+  '北電子': ['ジャグラー'],
+  'ユニバ|ユニバーサル': ['ミリオンゴッド', '沖ドキ', 'バジリスク', 'ハナビ', 'クランキー', 'バーサス', 'SHAMANKING'],
+  '大都': ['吉宗', 'ヨシムネ', '番長', '秘宝伝']
+};
+function parseHintText(text) {
+  var h = { daiban: [], suffix: [], kishu: [], note: '' };
+  (text.match(/(\d{3,4})番台/g) || []).forEach(function (s) { h.daiban.push(parseInt(s, 10)); });
+  var re = /末尾(\d)/g, sm;
+  while ((sm = re.exec(text))) h.suffix.push(parseInt(sm[1], 10));
+  HINT_ALIASES.forEach(function (a) {
+    if (a[0].test(text) && h.kishu.indexOf(a[1]) === -1) h.kishu.push(a[1]);
+  });
+  Object.keys(HINT_MAKERS).forEach(function (mk) {
+    if (new RegExp(mk, 'i').test(text)) {
+      HINT_MAKERS[mk].forEach(function (t) { if (h.kishu.indexOf(t) === -1) h.kishu.push(t); });
+    }
+  });
+  var dm = text.match(/(\d{1,2})\s*\/\s*(\d{1,2})/);
+  if (dm) h.postDate = ('0' + dm[1]).slice(-2) + '-' + ('0' + dm[2]).slice(-2);
+  return h;
+}
 
 function posterior56(m, spec) {
   var n = m.totalStart;
@@ -299,9 +348,25 @@ function render(data, hints) {
 // ==== データ読み込み ====
 var manifest = [];
 var hintsCache = null;
+var pastedHints = null;
+var currentData = null;
+function activeHints() {
+  if (pastedHints && currentData) {
+    var h = Object.assign({}, pastedHints, { date: currentData.targetDate });
+    if (pastedHints.postDate && String(currentData.targetDate).slice(5) !== pastedHints.postDate) {
+      h.note = (h.note || '') + ' ⚠ポスト内日付(' + pastedHints.postDate + ')が表示中データの日付と違います';
+    }
+    return h;
+  }
+  return hintsCache;
+}
+function rerender() {
+  if (currentData) render(currentData, activeHints());
+}
 function loadSnap(file) {
   fetch('data/' + file, { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (data) {
-    render(data, hintsCache);
+    currentData = data;
+    rerender();
   }).catch(function (e) {
     document.getElementById('out').textContent = '読み込み失敗: ' + e.message;
   });
@@ -330,12 +395,37 @@ fetch('collect/hints.json', { cache: 'no-store' }).then(function (r) { return r.
 document.getElementById('pasteBtn').onclick = function () {
   try {
     var txt = document.getElementById('paste').value;
-    var data = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
-    render(data, hintsCache);
+    currentData = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
+    rerender();
     window.scrollTo(0, 0);
   } catch (e) {
     alert('JSONの解析に失敗: ' + e.message);
   }
+};
+
+// ヒント(晒しポスト)貼り付け
+try {
+  var storedHint = localStorage.getItem('slot_hint_text');
+  if (storedHint) document.getElementById('hintText').value = storedHint;
+} catch (e) { }
+document.getElementById('hintBtn').onclick = function () {
+  var txt = document.getElementById('hintText').value.trim();
+  if (!txt) { alert('ポストの文面を貼ってください'); return; }
+  try { localStorage.setItem('slot_hint_text', txt); } catch (e) { }
+  var ph = parseHintText(txt);
+  ph.note = '貼付ポスト解読: ' + (ph.kishu.join('/') || 'キーワードなし') +
+    (ph.daiban.length ? ' 台番[' + ph.daiban.join(',') + ']' : '') +
+    (ph.suffix.length ? ' 末尾[' + ph.suffix.join(',') + ']' : '');
+  pastedHints = ph;
+  document.getElementById('hintBox').open = false;
+  rerender();
+  window.scrollTo(0, 0);
+};
+document.getElementById('hintClear').onclick = function () {
+  pastedHints = null;
+  document.getElementById('hintText').value = '';
+  try { localStorage.removeItem('slot_hint_text'); } catch (e) { }
+  rerender();
 };
 </script>
 </body>
