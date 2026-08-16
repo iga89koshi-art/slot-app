@@ -95,11 +95,28 @@
   var hintBtn = document.createElement('button');
   hintBtn.textContent = 'ヒント貼付';
   hintBtn.style.cssText = 'padding:10px 14px;font-size:14px;background:#63c;color:#fff;border:0;border-radius:6px;';
+  var setBtn = document.createElement('button');
+  setBtn.textContent = '設定';
+  setBtn.style.cssText = 'padding:10px 14px;font-size:14px;background:#835;color:#fff;border:0;border-radius:6px;';
+  setBtn.onclick = function () {
+    var cur = localStorage.getItem('slot_gh_token') ? '登録済み' : '未登録';
+    var t = prompt('サイト自動アップ用のGitHubトークン(現在: ' + cur + ')。貼り付けて OK。空欄でOKなら変更なし、「clear」で削除', '');
+    if (t === null) return;
+    t = t.trim();
+    if (t === 'clear') {
+      localStorage.removeItem('slot_gh_token');
+      logStrong('トークンを削除しました', '#f9c');
+    } else if (t) {
+      localStorage.setItem('slot_gh_token', t);
+      logStrong('トークンを保存しました。この後の収集完了時から自動アップされます', '#6f6');
+    }
+  };
   var stopBtn = document.createElement('button');
   stopBtn.textContent = '中止/閉じる';
   stopBtn.style.cssText = 'padding:10px 14px;font-size:14px;background:#c33;color:#fff;border:0;border-radius:6px;';
   stopBtn.onclick = function () { aborted = true; box.remove(); window.__slotCollectorRunning = false; };
   var logDiv = document.createElement('div');
+  topBar.appendChild(setBtn);
   topBar.appendChild(hintBtn);
   topBar.appendChild(stopBtn);
   box.appendChild(topBar);
