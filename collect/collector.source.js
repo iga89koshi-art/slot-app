@@ -587,6 +587,11 @@
   // ---- メイン ----
 
   try {
+    // 自動アップ未設定なら最初に登録ボタンを出す(店外でも設定だけ可能)
+    if (!localStorage.getItem('slot_gh_token')) {
+      logStrong('サイト自動アップが未設定です。下のボタンでトークンを登録できます(店外でもOK)', '#f9c');
+      showTokenSetup();
+    }
     var date = today();
     log('== スロットデータ収集開始 ' + date + ' 対象:' + (filterStr ? '/' + filterStr + '/' : '全機種') + (gasUrl ? '' : ' [ローカルモード:GAS送信なし]') + ' ==');
 
