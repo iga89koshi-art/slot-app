@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>高設定チェッカー</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #101418; color: #e6edf3; font: 14px/1.6 -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  header { position: sticky; top: 0; background: #161b22; padding: 10px 14px; border-bottom: 1px solid #2d333b; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  header .sub { color: #8b949e; font-size: 12px; }
+  select, button, textarea { font: inherit; }
+  select { background: #21262d; color: #e6edf3; border: 1px solid #444c56; border-radius: 8px; padding: 6px 8px; }
+  main { padding: 12px; max-width: 760px; margin: 0 auto; }
+  section { margin-bottom: 22px; }
+  h2 { font-size: 14px; margin: 0 0 8px; padding: 6px 10px; border-radius: 8px; }
+  .h-hint h2 { background: #3b2050; color: #e2b8ff; }
+  .h-jug h2 { background: #4d3800; color: #ffd866; }
+  .h-at h2 { background: #003d4d; color: #7ce0ff; }
+  .h-sum h2 { background: #4d2600; color: #ffb066; }
+  .h-run h2 { background: #0e4020; color: #7dedA6; }
+  .tbl { width: 100%; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; white-space: nowrap; }
+  th, td { padding: 6px 8px; border-bottom: 1px solid #2d333b; text-align: right; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  th { color: #8b949e; font-weight: normal; }
+  .hot { color: #ff7b72; font-weight: bold; }
+  .warm { color: #ffd866; }
+  .mark { font-weight: bold; }
+  .note { color: #8b949e; font-size: 12px; }
+  ul { padding-left: 18px; margin: 6px 0; }
+  details { background: #161b22; border: 1px solid #2d333b; border-radius: 10px; padding: 10px; }
+  textarea { width: 100%; height: 120px; background: #0d1117; color: #e6edf3; border: 1px solid #444c56; border-radius: 8px; margin: 8px 0; }
+  .btn { background: #238636; color: #fff; border: 0; border-radius: 8px; padding: 10px 16px; }
+  footer { color: #8b949e; font-size: 11px; text-align: center; padding: 20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>高設定チェッカー</h1>
+  <select id="snap"></select>
+  <span class="sub" id="meta"></span>
+</header>
+<main>
+  <div id="out"></div>
+  <details>
+    <summary>収集したJSONを貼り付けて分析(最新データをその場で見る)</summary>
+    <p class="note">店内で収集ツールの「JSONをコピー」をした直後なら、ここに貼ればサイトに保存されていない最新分も分析できます。</p>
+    <textarea id="paste" placeholder='{"ver":1,...}'></textarea>
+    <button class="btn" id="pasteBtn">貼り付けJSONを分析</button>
+  </details>
+  <footer>個人利用の設定推測ツール / 確率はデータ由来の推定値であり設定を保証しません</footer>
+</main>
+<script>
+// ==== 分析ロジック(収集ブックマークレットと同一) ====
+var SPECS = {
+  'SマイジャグラーVKD': [[273.1, 409.6], [270.8, 385.5], [266.4, 336.1], [254.0, 290.0], [240.1, 268.6], [229.1, 229.1]],
+  'Sゴーゴージャグラー3KA': [[259.0, 354.2], [256.0, 332.7], [249.2, 306.2], [246.5, 278.7], [242.7, 247.3], [234.9, 234.9]],
+  'SネオアイムジャグラーEX-KK': [[273.1, 439.8], [271.2, 399.6], [269.7, 331.0], [266.4, 315.1], [263.2, 292.6], [268.6, 268.6]]
+};
+var MIN_GAMES_RANK = 800;
+
+function posterior56(m, spec) {
+  var n = m.totalStart;
+  var lls = spec.map(function (st) {
+    var pb = 1 / st[0], pr = 1 / st[1];
+    return m.bb * Math.log(pb) + (n - m.bb) * Math.log(1 - pb) +
+           m.rb * Math.log(pr) + (n - m.rb) * Math.log(1 - pr);
+  });
+  var mx = Math.max.apply(null, lls);
+  var ws = lls.map(function (l) { return Math.exp(l - mx); });
+  var sum = ws.reduce(function (a, b) { return a + b; }, 0);
+  var p = ws.map(function (w) { return w / sum; });
+  return { p56: p[4] + p[5], p456: p[3] + p[4] + p[5] };
+}
+function firstHits(m) {
+  if (!m.history || !m.history.length) return (m.bb || 0) + (m.rb || 0);
+  var hist = m.history.slice().sort(function (a, b) { return a.no - b.no; });
+  var hits = 0;
+  hist.forEach(function (h, idx) { if (idx === 0 || h.start > 33) hits++; });
+  return hits;
+}
+function computeScores(machines) {
+  var scores = {};
+  machines.forEach(function (m) {
+    var spec = SPECS[m.kishuName];
+    if (spec && m.totalStart != null && m.totalStart >= MIN_GAMES_RANK && m.bb != null && m.rb != null) {
+      var r = posterior56(m, spec);
+      scores[m.daiban] = { kind: 'p', p56: r.p56, p456: r.p456 };
+    }
+  });
+  var groups = {};
+  machines.forEach(function (m) {
+    if (SPECS[m.kishuName]) return;
+    if (m.totalStart == null || m.totalStart < MIN_GAMES_RANK) return;
+    var hits = firstHits(m);
+    if (!hits) return;
+    (groups[m.kishuNo] = groups[m.kishuNo] || []).push({ m: m, hits: hits });
+  });
+  Object.keys(groups).forEach(function (k) {
+    var g = groups[k];
+    if (g.length < 4) return;
+    var sumH = 0, sumG = 0;
+    g.forEach(function (x) { sumH += x.hits; sumG += x.m.totalStart; });
+    var pbar = sumH / sumG;
+    g.forEach(function (x) {
+      var exp = x.m.totalStart * pbar;
+      scores[x.m.daiban] = { kind: 'z', z: (x.hits - exp) / Math.sqrt(exp), hits: x.hits, avgDen: Math.round(1 / pbar) };
+    });
+  });
+  return scores;
+}
+function isGood(m, scores) {
+  var s = scores[m.daiban];
+  if (!s) return false;
+  return s.kind === 'p' ? s.p56 >= 0.4 : s.z >= 1.0;
+}
+function shortName(m) { return m.kishuName.replace(/^(LB|L|S)/, ''); }
+
+// ==== 表示 ====
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function table(headers, rows) {
+  var wrap = el('div', 'tbl');
+  var t = el('table');
+  var tr = el('tr');
+  headers.forEach(function (h) { tr.appendChild(el('th', null, h)); });
+  t.appendChild(tr);
+  rows.forEach(function (r) {
+    var tr2 = el('tr');
+    r.forEach(function (c) {
+      var td = el('td');
+      if (c && typeof c === 'object') { td.textContent = c.text; if (c.cls) td.className = c.cls; }
+      else td.textContent = c;
+      tr2.appendChild(td);
+    });
+    t.appendChild(tr2);
+  });
+  wrap.appendChild(t);
+  return wrap;
+}
+function section(cls, title) {
+  var s = el('section', cls);
+  s.appendChild(el('h2', null, title));
+  return s;
+}
+
+function render(data, hints) {
+  var out = document.getElementById('out');
+  out.innerHTML = '';
+  var machines = data.machines.filter(function (m) { return m.totalStart != null; });
+  var scores = computeScores(machines);
+  document.getElementById('meta').textContent =
+    (data.targetDate || '') + ' / ' + machines.length + '台 / 更新 ' + (machines[0] && machines[0].updatedAt || '?');
+
+  // ヒント該当
+  if (hints && hints.date === data.targetDate && (hints.kishu || []).length + (hints.daiban || []).length + (hints.suffix || []).length > 0) {
+    var sh = section('h-hint', 'ヒント該当台 × 実データ');
+    if (hints.note) sh.appendChild(el('div', 'note', hints.note));
+    var matched = [];
+    machines.forEach(function (m) {
+      var reasons = [];
+      if ((hints.daiban || []).indexOf(m.daiban) !== -1) reasons.push('指名台');
+      if ((hints.suffix || []).indexOf(m.daiban % 10) !== -1) reasons.push('末尾' + (m.daiban % 10));
+      (hints.kishu || []).forEach(function (kw) { if (m.kishuName.indexOf(kw) !== -1) reasons.push(kw); });
+      ((hints.ranges) || []).forEach(function (r) { if (m.daiban >= r[0] && m.daiban <= r[1]) reasons.push('島' + r[0] + '-' + r[1]); });
+      if (reasons.length) matched.push({ m: m, reasons: reasons });
+    });
+    matched.sort(function (a, b) {
+      var sa = scores[a.m.daiban], sb = scores[b.m.daiban];
+      var ka = sa ? (sa.kind === 'p' ? sa.p56 * 10 : sa.z) : -99;
+      var kb = sb ? (sb.kind === 'p' ? sb.p56 * 10 : sb.z) : -99;
+      return kb - ka;
+    });
+    sh.appendChild(table(['台', '機種', 'G数', '合成', '評価', '該当理由'],
+      matched.slice(0, 25).map(function (x) {
+        var m = x.m, s = scores[m.daiban];
+        var ev = !s ? '-' : (s.kind === 'p' ? '高設定' + Math.round(s.p56 * 100) + '%' : '優秀度' + (s.z >= 0 ? '+' : '') + s.z.toFixed(1));
+        return [m.daiban, shortName(m), m.totalStart, m.gousei ? '1/' + m.gousei : '-',
+          { text: ev, cls: isGood(m, scores) ? 'hot' : '' }, x.reasons.join(',')];
+      })));
+    sh.appendChild(el('div', 'note', '該当' + matched.length + '台(評価が良い順に25台まで表示)'));
+    out.appendChild(sh);
+  }
+
+  // ジャグラー
+  var jr = machines.filter(function (m) { return scores[m.daiban] && scores[m.daiban].kind === 'p'; })
+    .sort(function (a, b) { return scores[b.daiban].p56 - scores[a.daiban].p56; });
+  var sj = section('h-jug', 'ジャグラー 高設定候補(設5・6確率順)');
+  sj.appendChild(table(['台', '機種', 'G数', 'BB', 'RB', '合成', '設5・6', '設4以上'],
+    jr.slice(0, 15).map(function (m) {
+      var s = scores[m.daiban];
+      var p = Math.round(s.p56 * 100);
+      return [m.daiban, shortName(m), m.totalStart, m.bb, m.rb, '1/' + (m.gousei || '?'),
+        { text: p + '%', cls: p >= 45 ? 'hot' : (p >= 30 ? 'warm' : '') },
+        Math.round(s.p456 * 100) + '%'];
+    })));
+  out.appendChild(sj);
+
+  // AT機
+  var at = machines.filter(function (m) { return scores[m.daiban] && scores[m.daiban].kind === 'z'; })
+    .sort(function (a, b) { return scores[b.daiban].z - scores[a.daiban].z; });
+  var sa = section('h-at', 'AT機など 同機種内で初当りが強い台');
+  sa.appendChild(table(['台', '機種', 'G数', '初当り', '機種平均', '優秀度'],
+    at.filter(function (m) { return scores[m.daiban].z >= 1; }).slice(0, 15).map(function (m) {
+      var s = scores[m.daiban];
+      return [m.daiban, shortName(m), m.totalStart,
+        s.hits + '(1/' + Math.round(m.totalStart / s.hits) + ')', '1/' + s.avgDen,
+        { text: '+' + s.z.toFixed(1), cls: s.z >= 2 ? 'hot' : 'warm' }];
+    })));
+  out.appendChild(sa);
+
+  // 機種別サマリー
+  var groups = {};
+  machines.forEach(function (m) {
+    var g = (groups[m.kishuNo + '_' + m.kashitama] = groups[m.kishuNo + '_' + m.kashitama] || { name: m.kishuName, ms: [] });
+    g.ms.push(m);
+  });
+  var rows = [];
+  Object.keys(groups).forEach(function (k) {
+    var g = groups[k];
+    if (g.ms.length < 3) return;
+    var good = g.ms.filter(function (m) { return isGood(m, scores); });
+    if (!good.length) return;
+    var pooled = '';
+    var spec = SPECS[g.name];
+    if (spec) {
+      var agg = { bb: 0, rb: 0, totalStart: 0 };
+      g.ms.forEach(function (m) { agg.bb += m.bb || 0; agg.rb += m.rb || 0; agg.totalStart += m.totalStart; });
+      pooled = '機種全体 高設定' + Math.round(posterior56(agg, spec).p56 * 100) + '%';
+    } else {
+      var sumH = 0, sumG = 0;
+      g.ms.forEach(function (m) { sumH += firstHits(m); sumG += m.totalStart; });
+      if (sumH) pooled = '初当り合算1/' + Math.round(sumG / sumH);
+    }
+    var ratio = good.length / g.ms.length;
+    rows.push({ name: g.name, n: g.ms.length, good: good.length, ratio: ratio, pooled: pooled, d: good.map(function (m) { return m.daiban; }) });
+  });
+  rows.sort(function (a, b) { return b.ratio - a.ratio || b.n - a.n; });
+  var ss = section('h-sum', '機種別サマリー(全台系・1/2配分の検出)');
+  ss.appendChild(table(['判定', '機種', '設置', '好調', '機種全体', '好調台番'],
+    rows.slice(0, 14).map(function (r) {
+      var mark = r.ratio >= 0.7 && r.n >= 3 ? '★全台系?' : (r.ratio >= 0.35 && r.n >= 8 ? '☆1/2?' : '');
+      return [{ text: mark, cls: 'mark ' + (mark.indexOf('★') === 0 ? 'hot' : 'warm') },
+        r.name.replace(/^(LB|L|S)/, ''), r.n + '台', r.good + '台', r.pooled, r.d.join(',')];
+    })));
+  out.appendChild(ss);
+
+  // 並び・座り目
+  var lines = [];
+  Object.keys(groups).forEach(function (k) {
+    var ms = groups[k].ms.slice().sort(function (a, b) { return a.daiban - b.daiban; });
+    var byDai = {};
+    ms.forEach(function (m) { byDai[m.daiban] = m; });
+    var run = [];
+    function flushRun() {
+      if (run.length >= 2) {
+        var neighbors = [];
+        var lo = run[0].daiban - 1, hi = run[run.length - 1].daiban + 1;
+        if (byDai[lo] && !isGood(byDai[lo], scores)) neighbors.push(lo);
+        if (byDai[hi] && !isGood(byDai[hi], scores)) neighbors.push(hi);
+        lines.push('並び' + run.length + '台: ' + run.map(function (m) { return m.daiban; }).join('-') + ' ' + shortName(run[0]) +
+          (neighbors.length ? ' → 端の隣 台' + neighbors.join(',台') + ' も座り目候補' : ''));
+      }
+      run = [];
+    }
+    ms.forEach(function (m) {
+      if (isGood(m, scores)) {
+        if (run.length && m.daiban !== run[run.length - 1].daiban + 1) flushRun();
+        run.push(m);
+      } else flushRun();
+    });
+    flushRun();
+    ms.forEach(function (m) {
+      var a = byDai[m.daiban - 1], b = byDai[m.daiban + 1];
+      if (a && b && isGood(a, scores) && isGood(b, scores) && !isGood(m, scores)) {
+        lines.push('挟まれ台: 台' + m.daiban + ' ' + shortName(m) + ' (両隣' + a.daiban + '/' + b.daiban + 'が好調) → 座り目候補');
+      }
+    });
+  });
+  var sr = section('h-run', '並び・座り目候補');
+  if (lines.length) {
+    var ul = el('ul');
+    lines.forEach(function (l) { ul.appendChild(el('li', null, l)); });
+    sr.appendChild(ul);
+  } else {
+    sr.appendChild(el('div', 'note', '検出なし'));
+  }
+  out.appendChild(sr);
+}
+
+// ==== データ読み込み ====
+var manifest = [];
+var hintsCache = null;
+function loadSnap(file) {
+  fetch('data/' + file, { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (data) {
+    render(data, hintsCache);
+  }).catch(function (e) {
+    document.getElementById('out').textContent = '読み込み失敗: ' + e.message;
+  });
+}
+fetch('collect/hints.json', { cache: 'no-store' }).then(function (r) { return r.json(); })
+  .then(function (h) { hintsCache = h; })
+  .catch(function () { })
+  .then(function () {
+    return fetch('data/index.json', { cache: 'no-store' }).then(function (r) { return r.json(); });
+  })
+  .then(function (list) {
+    manifest = list;
+    var sel = document.getElementById('snap');
+    list.forEach(function (it, i) {
+      var o = document.createElement('option');
+      o.value = it.file;
+      o.textContent = it.label;
+      sel.appendChild(o);
+    });
+    sel.onchange = function () { loadSnap(sel.value); };
+    if (list.length) loadSnap(list[0].file);
+    else document.getElementById('out').textContent = 'データがまだありません';
+  })
+  .catch(function (e) { document.getElementById('out').textContent = 'データ一覧の読み込み失敗: ' + e.message; });
+
+document.getElementById('pasteBtn').onclick = function () {
+  try {
+    var txt = document.getElementById('paste').value;
+    var data = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
+    render(data, hintsCache);
+    window.scrollTo(0, 0);
+  } catch (e) {
+    alert('JSONの解析に失敗: ' + e.message);
+  }
+};
+</script>
+</body>
+</html>
