@@ -43,6 +43,8 @@
   <h1>高設定チェッカー</h1>
   <select id="snap"></select>
   <span class="sub" id="meta"></span>
+  <a href="https://athink.jp/top.php?p=l&amp;tenpo_id=angyou" target="_blank" rel="noopener"
+     style="margin-left:auto;background:#238636;color:#fff;text-decoration:none;padding:7px 12px;border-radius:8px;font-size:13px;">収集する→</a>
 </header>
 <main>
   <div id="out"></div>
@@ -59,6 +61,17 @@
     <p class="note">店内で収集ツールの「JSONをコピー」をした直後なら、ここに貼ればサイトに保存されていない最新分も分析できます。</p>
     <textarea id="paste" placeholder='{"ver":1,...}'></textarea>
     <button class="btn" id="pasteBtn">貼り付けJSONを分析</button>
+  </details>
+  <p></p>
+  <details>
+    <summary>収集のやり方(店内のみ)</summary>
+    <ol style="padding-left:20px;">
+      <li>店のWiFiに接続した状態で、右上の「収集する→」でデータサイトを開く</li>
+      <li>開いたデータサイトの画面のまま、ブックマーク「スロット収集」をタップ</li>
+      <li>黒い画面で自動収集(2〜3分)→ その場でランキング表示 → サイトへ自動アップ</li>
+      <li>このページを開き直すと日付プルダウンに新しいデータが増える</li>
+    </ol>
+    <p class="note">※ブラウザの制約上、収集はデータサイト上でしか実行できません。ブックマークの登録方法はリポジトリのREADME参照。</p>
   </details>
   <footer>個人利用の設定推測ツール / 確率はデータ由来の推定値であり設定を保証しません</footer>
 </main>
