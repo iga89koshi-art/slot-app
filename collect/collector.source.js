@@ -108,7 +108,12 @@
       logStrong('トークンを削除しました', '#f9c');
     } else if (t) {
       localStorage.setItem('slot_gh_token', t);
-      logStrong('トークンを保存しました。この後の収集完了時から自動アップされます', '#6f6');
+      logStrong('トークンを保存しました。接続テスト中...', '#6f6');
+      ghApi('/contents/data/index.json', 'GET', null, t).then(function () {
+        logStrong('✅ 接続テストOK(トークン有効・API疎通あり)。次の収集からアップされます', '#6f6');
+      }, function (err) {
+        logStrong('⚠ 接続テスト失敗: ' + err.message + ' (401ならトークン設定ミス、Load failedならこの回線がGitHub APIを塞いでいる可能性)', '#f66');
+      });
     }
   };
   var stopBtn = document.createElement('button');
@@ -724,9 +729,12 @@
     try {
       uploaded = await ghUpload(payload, date);
     } catch (eU) {
-      log('サイト自動アップ失敗: ' + eU.message + ' (トークン期限切れ等の場合は下のボタンから再設定)');
-      localStorage.removeItem('slot_gh_token');
-      showTokenSetup();
+      if (String(eU.message).indexOf('401') !== -1) {
+        log('サイト自動アップ失敗: トークンが無効です。上部の「設定」から登録し直してください');
+        localStorage.removeItem('slot_gh_token');
+      } else {
+        log('サイト自動アップ失敗: ' + eU.message + ' (通信エラーの可能性。トークンは保持したまま、下のコピー画面を保険に表示します)');
+      }
     }
     if (gasUrl) {
       log('GASへ送信中...');
