@@ -530,6 +530,60 @@
     document.body.appendChild(modal);
   };
 
+  // ---- サイト自動アップ(GitHub contents API) ----
+
+  var GH_REPO = 'iga89koshi-art/slot-app';
+
+  function b64u(str) { return btoa(unescape(encodeURIComponent(str))); }
+  function b64d(str) { return decodeURIComponent(escape(atob(String(str).replace(/\n/g, '')))); }
+
+  async function ghApi(path, method, body, token) {
+    var res = await fetch('https://api.github.com/repos/' + GH_REPO + path, {
+      method: method || 'GET',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json'
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    if (!res.ok) throw new Error('GitHub API ' + res.status);
+    return res.json();
+  }
+
+  function showTokenSetup() {
+    var b = document.createElement('button');
+    b.textContent = 'サイト自動アップを設定(GitHubトークン貼付)';
+    b.style.cssText = 'display:block;width:100%;padding:12px;font-size:14px;background:#835;color:#fff;border:0;border-radius:6px;margin:8px 0;';
+    b.onclick = function () {
+      var t = prompt('GitHubのFine-grainedトークンを貼り付けてください(slot-appリポジトリのContents読み書き権限)');
+      if (t && t.trim()) {
+        localStorage.setItem('slot_gh_token', t.trim());
+        b.remove();
+        logStrong('トークンを保存しました。次回の収集から自動アップされます', '#6f6');
+      }
+    };
+    logDiv.appendChild(b);
+  }
+
+  async function ghUpload(payload, date) {
+    var token = localStorage.getItem('slot_gh_token') || '';
+    if (!token) { showTokenSetup(); return false; }
+    var now = new Date();
+    var hhmm = ('0' + now.getHours()).slice(-2) + ('0' + now.getMinutes()).slice(-2);
+    var fname = date + '_' + hhmm + '.json';
+    log('サイトへ自動アップ中... (' + fname + ')');
+    await ghApi('/contents/data/' + fname, 'PUT',
+      { message: '収集データ ' + date + ' ' + hhmm, content: b64u(payload) }, token);
+    var idx = await ghApi('/contents/data/index.json', 'GET', null, token);
+    var list = JSON.parse(b64d(idx.content));
+    list.unshift({ file: fname, label: date.slice(5).replace('-', '/') + ' ' + hhmm.slice(0, 2) + ':' + hhmm.slice(2) + '時点' });
+    await ghApi('/contents/data/index.json', 'PUT',
+      { message: 'データ一覧を更新 ' + fname, content: b64u(JSON.stringify(list, null, 1)), sha: idx.sha }, token);
+    logStrong('✅ サイトへアップ完了。閲覧ページに数分で反映されます', '#6f6');
+    return true;
+  }
+
   // ---- メイン ----
 
   try {
@@ -644,6 +698,14 @@
       collectedAt: new Date().toISOString(),
       machines: machines
     });
+    var uploaded = false;
+    try {
+      uploaded = await ghUpload(payload, date);
+    } catch (eU) {
+      log('サイト自動アップ失敗: ' + eU.message + ' (トークン期限切れ等の場合は下のボタンから再設定)');
+      localStorage.removeItem('slot_gh_token');
+      showTokenSetup();
+    }
     if (gasUrl) {
       log('GASへ送信中...');
       try {
@@ -665,8 +727,9 @@
           showJsonCopy(payload);
         }
       }
-    } else {
-      log('GAS未設定のためコピー画面を表示します');
+    }
+    if (!uploaded && !gasUrl) {
+      log('自動アップ未設定のためコピー画面を表示します');
       showJsonCopy(payload);
     }
     log('== 完了。「中止/閉じる」で閉じてください ==');
