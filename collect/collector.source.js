@@ -21,7 +21,12 @@
   var SPECS = {
     'SマイジャグラーVKD': [[273.1, 409.6], [270.8, 385.5], [266.4, 336.1], [254.0, 290.0], [240.1, 268.6], [229.1, 229.1]],
     'Sゴーゴージャグラー3KA': [[259.0, 354.2], [256.0, 332.7], [249.2, 306.2], [246.5, 278.7], [242.7, 247.3], [234.9, 234.9]],
-    'SネオアイムジャグラーEX-KK': [[273.1, 439.8], [271.2, 399.6], [269.7, 331.0], [266.4, 315.1], [263.2, 292.6], [268.6, 268.6]]
+    'SネオアイムジャグラーEX-KK': [[273.1, 439.8], [271.2, 399.6], [269.7, 331.0], [266.4, 315.1], [263.2, 292.6], [268.6, 268.6]],
+    'SウルトラミラクルジャグラーKT': [[267.5, 425.6], [256.4, 390.8], [245.7, 358.8], [235.5, 329.5], [225.7, 302.5], [216.3, 277.7]],
+    'SミスタージャグラーKK': [[268.6, 374.5], [262.0, 341.8], [255.6, 312.0], [249.4, 284.8], [243.3, 260.0], [237.4, 237.4]],
+    'SジャグラーガールズSS-KH': [[273.1, 381.0], [263.0, 350.9], [253.2, 323.1], [243.8, 297.5], [234.7, 274.0], [226.0, 252.1]],
+    'SハッピージャグラーVⅢEA': [[273.1, 397.2], [270.8, 362.1], [263.2, 332.7], [254.0, 300.6], [239.2, 273.1], [226.0, 256.0]],
+    'SアイムジャグラーEX-TP': [[273.1, 439.8], [271.2, 399.6], [269.7, 331.0], [266.4, 315.1], [263.2, 292.6], [268.6, 268.6]]
   };
   var MIN_GAMES_RANK = 800;
 
@@ -690,6 +695,82 @@
     document.body.appendChild(modal);
   };
 
+  // ---- 前日比較(据え置き・リセット判定) ----
+
+  var RAW_BASE = 'https://raw.githubusercontent.com/iga89koshi-art/slot-app/main/';
+
+  // サイトに保存済みのデータ一覧から「今日より前の最新スナップショット」を取得
+  async function loadPrevDay(date) {
+    try {
+      var idx = await (await fetch(RAW_BASE + 'data/index.json', { cache: 'no-store' })).json();
+      var entry = null;
+      for (var i = 0; i < idx.length; i++) {
+        var fm = (idx[i].file || '').match(/(\d{4}-\d{2}-\d{2})/);
+        if (fm && fm[1] < date) { entry = idx[i]; break; }
+      }
+      if (!entry) return null;
+      var data = await (await fetch(RAW_BASE + 'data/' + entry.file, { cache: 'no-store' })).json();
+      return { label: entry.label || entry.file, machines: data.machines || [] };
+    } catch (e) { return null; }
+  }
+
+  function renderPrevCompare(machines, scores, prev, atspecs) {
+    var prevMap = {};
+    prev.machines.forEach(function (m) { if (m.totalStart != null) prevMap[m.daiban] = m; });
+    var prevScores = computeScores(prev.machines, atspecs);
+
+    logStrong('== 前日比較(' + prev.label + ') ==', '#fc6');
+
+    // 1) 前日の高設定候補が今日どうなっているか
+    var cand = prev.machines.filter(function (m) {
+      var s = prevScores[m.daiban];
+      return s && s.kind !== 'z' && s.p56 >= 0.45;
+    }).sort(function (a, b) { return prevScores[b.daiban].p56 - prevScores[a.daiban].p56; });
+    logStrong('　▼前日高設定候補の今日(据え置きチェック)', '#fc6');
+    if (!cand.length) logStrong('　(前日45%以上の候補なし)', '#fc6');
+    cand.slice(0, 10).forEach(function (pm) {
+      var tm = null;
+      machines.forEach(function (m) { if (m.daiban === pm.daiban) tm = m; });
+      var todayTxt = '今日: データなし';
+      if (tm && tm.totalStart != null) {
+        todayTxt = '今日: G' + tm.totalStart + scoreText(tm, scores[tm.daiban]);
+        if (tm.totalStart < MIN_GAMES_RANK && !scores[tm.daiban]) todayTxt += ' (まだ試行少)';
+      }
+      logStrong('　台' + pm.daiban + ' ' + shortName(pm) +
+        ' 前日' + Math.round(prevScores[pm.daiban].p56 * 100) + '%(G' + pm.totalStart + ') → ' + todayTxt, '#fc6');
+    });
+
+    // 2) 宵越しG数によるリセット/据え置きシグナル
+    logStrong('　▼リセ・据え置きシグナル(今日の1回目の当たりベース)', '#fc6');
+    var sig = 0;
+    machines.forEach(function (m) {
+      var pm = prevMap[m.daiban];
+      var spec = atspecs && atspecs[m.kishuName];
+      if (!pm || !spec || !spec.tenjoG) return;
+      var sets = computeSets(m);
+      if (!sets.length) return;
+      var first = sets[0].firstStart;
+      var hang = pm.games || 0; // 前日閉店時のハマリG
+      var total = hang + first;
+      var msg = '';
+      (spec.resetZones || []).forEach(function (z) {
+        if (first >= z[0] && first <= z[1]) msg = 'リセット示唆(短縮天井' + first + 'Gで当選)';
+      });
+      if (!msg && hang >= 150) {
+        if (total >= spec.tenjoG - 60 && total <= spec.tenjoG + 120) {
+          msg = '据え置き示唆(宵越し' + total + 'G≒天井' + spec.tenjoG + 'で当選)';
+        } else if (total > spec.tenjoG + 120) {
+          msg = 'リセット濃厚(宵越し' + total + 'Gなら天井' + spec.tenjoG + '超のはず)';
+        }
+      }
+      if (msg && sig < 15) {
+        sig++;
+        logStrong('　台' + m.daiban + ' ' + shortName(m) + ' 前日' + hang + 'Gヤメ+今日' + first + 'G → ' + msg, '#fc6');
+      }
+    });
+    if (!sig) logStrong('　(シグナル検出なし)', '#fc6');
+  }
+
   // ---- サイト自動アップ(GitHub contents API) ----
 
   var GH_REPO = 'iga89koshi-art/slot-app';
@@ -746,6 +827,8 @@
 
   // ---- メイン ----
 
+  var VERSION = '2026-08-17b';
+
   try {
     // 自動アップ未設定なら最初に登録ボタンを出す(店外でも設定だけ可能)
     if (!localStorage.getItem('slot_gh_token')) {
@@ -753,7 +836,14 @@
       showTokenSetup();
     }
     var date = today();
-    log('== スロットデータ収集開始 ' + date + ' 対象:' + (filterStr ? '/' + filterStr + '/' : '全機種') + (gasUrl ? '' : ' [ローカルモード:GAS送信なし]') + ' ==');
+    var prevDayPromise = loadPrevDay(date);
+    // 台番キャッシュの古い日付分を掃除
+    try {
+      Object.keys(localStorage).forEach(function (key) {
+        if (key.indexOf('slot_dai_') === 0 && key.indexOf('slot_dai_' + date) !== 0) localStorage.removeItem(key);
+      });
+    } catch (eC) { }
+    log('[v' + VERSION + '] == スロットデータ収集開始 ' + date + ' 対象:' + (filterStr ? '/' + filterStr + '/' : '全機種') + (gasUrl ? '' : ' [ローカルモード:GAS送信なし]') + ' ==');
 
     log('機種一覧を取得中...');
     var kishuDoc = await fetchDoc('./php/back/show/kishu_list.php?tenpo_id=' + TENPO + '&p=l&tkn=');
@@ -782,28 +872,39 @@
       log('[' + (i + 1) + '/' + kishus.length + '] ' + k.name + ' の台一覧を取得中...');
 
       var daibans = [];
-      var seenDai = {};
-      var page = 1;
-      var maxPage = 1;
-      while (page <= maxPage && page <= 30) {
-        if (aborted) return;
-        var listUrl = './php/back/show/dai_list.self.php?page=' + page +
-          '&tab=dai_list&tenpo_id=' + TENPO + '&kishu_no=' + k.no +
-          '&target_date=' + date + '&kashitama_id=' + k.kashitama.replace(/_/g, '.') +
-          '&kishu_name=' + k.nameEnc + '&p=l&tkn=';
-        var listDoc = await fetchDoc(listUrl);
-        listDoc.querySelectorAll('.list_dedama').forEach(function (el) {
-          var d = el.getAttribute('data-daiban');
-          if (d && !seenDai[d]) { seenDai[d] = 1; daibans.push(d); }
-        });
-        listDoc.querySelectorAll('.pagerclz4dailist,.pagerclz4slump').forEach(function (a) {
-          var p = parseInt(a.getAttribute('data-page'), 10);
-          if (p && p > maxPage) maxPage = p;
-        });
-        page++;
-        await sleep(THROTTLE_MS);
+      var cacheKey = 'slot_dai_' + date + '_' + k.no + '_' + k.kashitama;
+      var cached = null;
+      try { cached = JSON.parse(localStorage.getItem(cacheKey) || 'null'); } catch (eK) { }
+      if (cached && cached.length) {
+        daibans = cached;
+        log('  台番(キャッシュ): ' + daibans.join(','));
+      } else {
+        var seenDai = {};
+        var page = 1;
+        var maxPage = 1;
+        while (page <= maxPage && page <= 30) {
+          if (aborted) return;
+          var listUrl = './php/back/show/dai_list.self.php?page=' + page +
+            '&tab=dai_list&tenpo_id=' + TENPO + '&kishu_no=' + k.no +
+            '&target_date=' + date + '&kashitama_id=' + k.kashitama.replace(/_/g, '.') +
+            '&kishu_name=' + k.nameEnc + '&p=l&tkn=';
+          var listDoc = await fetchDoc(listUrl);
+          listDoc.querySelectorAll('.list_dedama').forEach(function (el) {
+            var d = el.getAttribute('data-daiban');
+            if (d && !seenDai[d]) { seenDai[d] = 1; daibans.push(d); }
+          });
+          listDoc.querySelectorAll('.pagerclz4dailist,.pagerclz4slump').forEach(function (a) {
+            var p = parseInt(a.getAttribute('data-page'), 10);
+            if (p && p > maxPage) maxPage = p;
+          });
+          page++;
+          await sleep(THROTTLE_MS);
+        }
+        if (daibans.length) {
+          try { localStorage.setItem(cacheKey, JSON.stringify(daibans)); } catch (eS) { }
+        }
+        log('  台番: ' + daibans.join(','));
       }
-      log('  台番: ' + daibans.join(','));
 
       for (var j = 0; j < daibans.length; j++) {
         if (aborted) return;
@@ -855,6 +956,9 @@
     renderRankings(machines, lastScores);
     renderKishuSummary(machines, lastScores, hints);
     renderRuns(machines, lastScores);
+    var prevDay = await prevDayPromise;
+    if (prevDay) renderPrevCompare(machines, lastScores, prevDay, window.__slotAtspecs);
+    else logStrong('(前日データなし: 前日比較はスキップ)', '#fc6');
 
     var payload = JSON.stringify({
       ver: 1,

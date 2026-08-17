@@ -22,6 +22,7 @@
   .h-at h2 { background: #003d4d; color: #7ce0ff; }
   .h-sum h2 { background: #4d2600; color: #ffb066; }
   .h-run h2 { background: #0e4020; color: #7dedA6; }
+  .h-prev h2 { background: #4a3200; color: #ffcf80; }
   .tbl { width: 100%; overflow-x: auto; }
   table { border-collapse: collapse; width: 100%; font-size: 13px; white-space: nowrap; }
   th, td { padding: 6px 8px; border-bottom: 1px solid #2d333b; text-align: right; }
@@ -63,6 +64,11 @@
     <button class="btn" id="pasteBtn">貼り付けJSONを分析</button>
   </details>
   <p></p>
+  <details id="dailyBox">
+    <summary>日別の答え合わせ(全台系・高設定候補の履歴)</summary>
+    <div id="dailyOut" class="note">開くと各日の最終データを読み込んで集計します...</div>
+  </details>
+  <p></p>
   <details>
     <summary>収集のやり方(店内のみ)</summary>
     <ol style="padding-left:20px;">
@@ -80,7 +86,12 @@
 var SPECS = {
   'SマイジャグラーVKD': [[273.1, 409.6], [270.8, 385.5], [266.4, 336.1], [254.0, 290.0], [240.1, 268.6], [229.1, 229.1]],
   'Sゴーゴージャグラー3KA': [[259.0, 354.2], [256.0, 332.7], [249.2, 306.2], [246.5, 278.7], [242.7, 247.3], [234.9, 234.9]],
-  'SネオアイムジャグラーEX-KK': [[273.1, 439.8], [271.2, 399.6], [269.7, 331.0], [266.4, 315.1], [263.2, 292.6], [268.6, 268.6]]
+  'SネオアイムジャグラーEX-KK': [[273.1, 439.8], [271.2, 399.6], [269.7, 331.0], [266.4, 315.1], [263.2, 292.6], [268.6, 268.6]],
+  'SウルトラミラクルジャグラーKT': [[267.5, 425.6], [256.4, 390.8], [245.7, 358.8], [235.5, 329.5], [225.7, 302.5], [216.3, 277.7]],
+  'SミスタージャグラーKK': [[268.6, 374.5], [262.0, 341.8], [255.6, 312.0], [249.4, 284.8], [243.3, 260.0], [237.4, 237.4]],
+  'SジャグラーガールズSS-KH': [[273.1, 381.0], [263.0, 350.9], [253.2, 323.1], [243.8, 297.5], [234.7, 274.0], [226.0, 252.1]],
+  'SハッピージャグラーVⅢEA': [[273.1, 397.2], [270.8, 362.1], [263.2, 332.7], [254.0, 300.6], [239.2, 273.1], [226.0, 256.0]],
+  'SアイムジャグラーEX-TP': [[273.1, 439.8], [271.2, 399.6], [269.7, 331.0], [266.4, 315.1], [263.2, 292.6], [268.6, 268.6]]
 };
 var MIN_GAMES_RANK = 800;
 
@@ -526,8 +537,11 @@ function activeHints() {
   }
   return hintsCache;
 }
+var renderSeq = 0;
 function rerender() {
-  if (currentData) render(currentData, activeHints());
+  if (!currentData) return;
+  render(currentData, activeHints());
+  renderPrevSection(currentData, ++renderSeq);
 }
 function loadSnap(file) {
   fetch('data/' + file, { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (data) {
@@ -537,6 +551,123 @@ function loadSnap(file) {
     document.getElementById('out').textContent = '読み込み失敗: ' + e.message;
   });
 }
+
+// ==== 前日比較(据え置き・リセット判定) ====
+function prevEntryFor(date) {
+  for (var i = 0; i < manifest.length; i++) {
+    var fm = (manifest[i].file || '').match(/(\d{4}-\d{2}-\d{2})/);
+    if (fm && fm[1] < date) return manifest[i];
+  }
+  return null;
+}
+function renderPrevSection(data, seq) {
+  var entry = prevEntryFor(String(data.targetDate || ''));
+  if (!entry) return;
+  fetch('data/' + entry.file, { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (prevData) {
+    if (seq !== renderSeq) return; // 表示切替済みなら破棄
+    var machines = data.machines.filter(function (m) { return m.totalStart != null; });
+    var scores = computeScores(machines);
+    var prevMachines = prevData.machines.filter(function (m) { return m.totalStart != null; });
+    var prevScores = computeScores(prevMachines);
+    var prevMap = {};
+    prevMachines.forEach(function (m) { prevMap[m.daiban] = m; });
+
+    var sec = section('h-prev', '前日比較(' + (entry.label || entry.file) + ') 据え置き・リセット判定');
+
+    var cand = prevMachines.filter(function (m) {
+      var s = prevScores[m.daiban];
+      return s && s.kind !== 'z' && s.p56 >= 0.45;
+    }).sort(function (a, b) { return prevScores[b.daiban].p56 - prevScores[a.daiban].p56; });
+    var todayMap = {};
+    machines.forEach(function (m) { todayMap[m.daiban] = m; });
+    sec.appendChild(el('div', 'note', '▼前日の高設定候補(45%以上)が今日どうなっているか'));
+    sec.appendChild(table(['台', '機種', '前日', '今日G数', '今日の評価'],
+      cand.slice(0, 12).map(function (pm) {
+        var tm = todayMap[pm.daiban];
+        var s = tm && scores[tm.daiban];
+        var ev = !tm ? 'データなし' : (!s ? (tm.totalStart < MIN_GAMES_RANK ? 'まだ試行少' : '-')
+          : (s.kind === 'z' ? '優秀度' + (s.z >= 0 ? '+' : '') + s.z.toFixed(1) : '高設定' + Math.round(s.p56 * 100) + '%'));
+        return [pm.daiban, shortName(pm), Math.round(prevScores[pm.daiban].p56 * 100) + '%',
+          tm ? tm.totalStart : '-', { text: ev, cls: tm && isGood(tm, scores) ? 'hot' : '' }];
+      })));
+
+    var sigRows = [];
+    machines.forEach(function (m) {
+      var pm = prevMap[m.daiban];
+      var spec = ATSPECS[m.kishuName];
+      if (!pm || !spec || !spec.tenjoG) return;
+      var sets = computeSets(m);
+      if (!sets.length) return;
+      var first = sets[0].firstStart;
+      var hang = pm.games || 0;
+      var total = hang + first;
+      var msg = '';
+      (spec.resetZones || []).forEach(function (z) {
+        if (first >= z[0] && first <= z[1]) msg = 'リセット示唆(短縮天井' + first + 'Gで当選)';
+      });
+      if (!msg && hang >= 150) {
+        if (total >= spec.tenjoG - 60 && total <= spec.tenjoG + 120) msg = '据え置き示唆(宵越し' + total + 'G≒天井)';
+        else if (total > spec.tenjoG + 120) msg = 'リセット濃厚(宵越し' + total + 'Gなら天井超のはず)';
+      }
+      if (msg) sigRows.push([m.daiban, shortName(m), hang + 'G', first + 'G', msg]);
+    });
+    sec.appendChild(el('div', 'note', '▼宵越しG数シグナル(前日ヤメG+今日の1回目当選G)'));
+    if (sigRows.length) sec.appendChild(table(['台', '機種', '前日ヤメ', '今日初当り', '判定'], sigRows.slice(0, 15)));
+    else sec.appendChild(el('div', 'note', 'シグナル検出なし'));
+
+    var out = document.getElementById('out');
+    var hintSec = out.querySelector('section.h-hint');
+    if (hintSec) out.insertBefore(sec, hintSec.nextSibling);
+    else out.insertBefore(sec, out.firstChild);
+  }).catch(function () { });
+}
+
+// ==== 日別の答え合わせ ====
+var dailyLoaded = false;
+document.getElementById('dailyBox').addEventListener('toggle', function () {
+  if (!this.open || dailyLoaded) return;
+  dailyLoaded = true;
+  var byDate = {};
+  manifest.forEach(function (it) {
+    var fm = (it.file || '').match(/(\d{4}-\d{2}-\d{2})/);
+    if (fm && !byDate[fm[1]]) byDate[fm[1]] = it; // manifestは新しい順なので最初=その日の最終
+  });
+  var dates = Object.keys(byDate).sort().reverse();
+  var target = document.getElementById('dailyOut');
+  target.textContent = '読み込み中...';
+  Promise.all(dates.map(function (d) {
+    return fetch('data/' + byDate[d].file, { cache: 'no-store' }).then(function (r) { return r.json(); })
+      .then(function (data) { return { date: d, data: data }; }).catch(function () { return null; });
+  })).then(function (list) {
+    target.textContent = '';
+    list.filter(Boolean).forEach(function (item) {
+      var machines = item.data.machines.filter(function (m) { return m.totalStart != null; });
+      var scores = computeScores(machines);
+      var tops = machines.filter(function (m) { return scores[m.daiban] && scores[m.daiban].kind !== 'z'; })
+        .sort(function (a, b) { return scores[b.daiban].p56 - scores[a.daiban].p56; }).slice(0, 5);
+      // 全台系候補
+      var groups = {};
+      machines.forEach(function (m) {
+        var g = (groups[m.kishuNo + '_' + m.kashitama] = groups[m.kishuNo + '_' + m.kashitama] || { name: m.kishuName, ms: [] });
+        g.ms.push(m);
+      });
+      var zentai = [];
+      Object.keys(groups).forEach(function (k) {
+        var g = groups[k];
+        if (g.ms.length < 3) return;
+        var good = g.ms.filter(function (m) { return isGood(m, scores); });
+        if (good.length / g.ms.length >= 0.7) zentai.push(g.name.replace(/^(LB|L|S)/, '') + '(' + good.length + '/' + g.ms.length + ')');
+      });
+      var div = el('div');
+      div.appendChild(el('strong', null, item.date + ' '));
+      div.appendChild(document.createTextNode(
+        'TOP: ' + tops.map(function (m) { return '台' + m.daiban + ' ' + Math.round(scores[m.daiban].p56 * 100) + '%'; }).join(' / ') +
+        (zentai.length ? ' | 全台系?: ' + zentai.join(', ') : '')));
+      target.appendChild(div);
+    });
+    if (!target.childNodes.length) target.textContent = 'データなし';
+  });
+});
 fetch('collect/atspecs.json', { cache: 'no-store' }).then(function (r) { return r.json(); })
   .then(function (a) { ATSPECS = a || {}; })
   .catch(function () { })
