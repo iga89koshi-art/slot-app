@@ -269,8 +269,7 @@
     return sets;
   }
 
-  // 挙動指標: 単発率・平均獲得・早当り(ゾーン)・天井回数
-    // 機種別チェック(すろらぼルール)を履歴に適用する
+  // 機種別チェック(すろらぼルール)を履歴に適用する
   // 返り値: marks=表示用の所見、extra=設定推測に組み込む追加観測(観測数k/試行n/設定別確率)
   function runChecks(m, spec) {
     var res = { marks: [], extra: [] };
@@ -284,7 +283,8 @@
         }).length;
         var share = k / sets.length;
         res.marks.push({ label: c.label, text: k + '/' + sets.length,
-          dir: share >= (c.goodShare || 0.3) ? 1 : (share <= (c.badShare || 0.1) ? -1 : 0) });
+          dir: c.neutral ? 0 : (share >= (c.goodShare || 0.3) ? 1 : (share <= (c.badShare || 0.1) ? -1 : 0)) });
+        if (c.probs && sets.length >= 3) res.extra.push({ k: k, n: sets.length, probs: c.probs });
       } else if (c.type === 'pins') {
         var hits = [];
         sets.forEach(function (s) {
@@ -296,7 +296,15 @@
         var kb = sets.filter(function (s) { return s.firstDedama >= c.threshold; }).length;
         res.marks.push({ label: c.label, text: kb + '/' + sets.length,
           dir: kb / sets.length >= c.midShare ? 1 : -1 });
-        res.extra.push({ k: kb, n: sets.length, probs: c.probs });
+        if (c.probs) res.extra.push({ k: kb, n: sets.length, probs: c.probs });
+      } else if (c.type === 'setBigRate') {
+        // 小当り(ボーナス等)からAT/大出玉へ繋がった率: セット合計獲得が閾値以上
+        if (sets.length < 3) return;
+        var kg = sets.filter(function (s) { return s.dedama >= c.threshold; }).length;
+        var shg = kg / sets.length;
+        res.marks.push({ label: c.label, text: kg + '/' + sets.length,
+          dir: c.probs ? (shg >= (c.probs['6'] + c.probs['1']) / 2 ? 1 : -1) : 0 });
+        if (c.probs) res.extra.push({ k: kg, n: sets.length, probs: c.probs });
       } else if (c.type === 'lateATsignal') {
         var kd = 0;
         (m.history || []).forEach(function (h) {
@@ -305,6 +313,15 @@
         var nd = Math.max(sets.length, kd, 1);
         res.marks.push({ label: c.label, text: kd + '回', dir: kd >= 2 ? 1 : 0 });
         res.extra.push({ k: kd, n: nd, probs: c.probs });
+      } else if (c.type === 'directPerGame') {
+        // 毎ゲーム抽選の直撃信号(例: 鏡のBB後1桁以外のG数でのRB信号)
+        if (!m.totalStart) return;
+        var kp = 0;
+        (m.history || []).forEach(function (h) {
+          if (h.type === (c.signal || 'RB') && h.start >= (c.minStart || 10)) kp++;
+        });
+        res.marks.push({ label: c.label, text: kp + '回', dir: kp >= 1 ? 1 : 0 });
+        if (c.probs) res.extra.push({ k: kp, n: m.totalStart, probs: c.probs });
       } else if (c.type === 'parity') {
         if (!sets.length) return;
         var ke = sets.filter(function (s) { return Math.floor(s.firstStart / 100) % 2 === 0; }).length;
@@ -312,9 +329,15 @@
       } else if (c.type === 'bigRegBias') {
         var bb = m.bb || 0, rb = m.rb || 0;
         if (bb + rb >= 8) {
-          var r = bb / (bb + rb);
-          res.marks.push({ label: c.label, text: Math.round(r * 100) + '%',
-            dir: r >= 0.55 ? 1 : (r <= 0.45 ? -1 : 0) });
+          if (c.pref === 'reg') {
+            var rr = rb / (bb + rb);
+            res.marks.push({ label: c.label || 'REG率', text: Math.round(rr * 100) + '%',
+              dir: rr >= (c.good || 0.42) ? 1 : (rr <= (c.bad || 0.3) ? -1 : 0) });
+          } else {
+            var r = bb / (bb + rb);
+            res.marks.push({ label: c.label || 'BIG率', text: Math.round(r * 100) + '%',
+              dir: r >= 0.55 ? 1 : (r <= 0.45 ? -1 : 0) });
+          }
         }
       } else if (c.type === 'renchan') {
         if (sets.length < 3) return;
@@ -332,7 +355,8 @@
       return mk.label + mk.text + (mk.dir > 0 ? '↑' : (mk.dir < 0 ? '↓' : ''));
     }).join(' ');
   }
-  
+
+  // 挙動指標: 単発率・平均獲得・早当り(ゾーン)・天井回数
   function extrasText(m, spec) {
     var sets = computeSets(m);
     if (!sets.length) return '';
@@ -402,10 +426,35 @@
         scores[m.daiban] = { kind: 'p', p56: r.p56, p456: r.p456 };
       }
     });
+    var aTypeDone = {};
+    // Aタイプ(BIG/REG別スペック)の機種はカウンターのBB/RBで直接推定
+    machines.forEach(function (m) {
+      var sp = atspecs[m.kishuName];
+      if (!sp || !sp.aType) return;
+      if (m.totalStart == null || m.totalStart < MIN_GAMES_RANK || m.bb == null || m.rb == null) return;
+      var labels = atLabels(sp);
+      var lls = labels.map(function (s) {
+        var pb = 1 / sp.s[s][0], pr = 1 / sp.s[s][1];
+        return m.bb * Math.log(pb) + (m.totalStart - m.bb) * Math.log(1 - pb) +
+               m.rb * Math.log(pr) + (m.totalStart - m.rb) * Math.log(1 - pr);
+      });
+      var mx = Math.max.apply(null, lls);
+      var ws = lls.map(function (l) { return Math.exp(l - mx); });
+      var sum = ws.reduce(function (a, b) { return a + b; }, 0);
+      var p56 = 0, p456 = 0;
+      labels.forEach(function (s, i) {
+        var p = ws[i] / sum;
+        if (s >= 5) p56 += p;
+        if (s >= 4) p456 += p;
+      });
+      var ch = runChecks(m, sp);
+      scores[m.daiban] = { kind: 'pa', p56: p56, p456: p456, hits: (m.bb || 0) + (m.rb || 0), marks: ch.marks };
+      aTypeDone[m.kishuName] = 1;
+    });
     // すろらぼスペックのある機種: 初当り確率のベイズ推定
     var atGroups = {};
     machines.forEach(function (m) {
-      if (SPECS[m.kishuName] || !atspecs[m.kishuName]) return;
+      if (SPECS[m.kishuName] || !atspecs[m.kishuName] || atspecs[m.kishuName].aType) return;
       if (m.totalStart == null || m.totalStart < MIN_GAMES_RANK) return;
       var hits = firstHits(m);
       if (!hits) return;
@@ -441,7 +490,7 @@
     // スペックが無い/スケール不一致の機種: 同機種内比較(z値)
     var groups = {};
     machines.forEach(function (m) {
-      if (SPECS[m.kishuName] || acceptedAt[m.kishuName]) return;
+      if (SPECS[m.kishuName] || acceptedAt[m.kishuName] || aTypeDone[m.kishuName]) return;
       if (m.totalStart == null || m.totalStart < MIN_GAMES_RANK) return;
       var hits = firstHits(m);
       if (!hits) return;
@@ -896,7 +945,7 @@
 
   // ---- メイン ----
 
-  var VERSION = '2026-08-17c';
+  var VERSION = '2026-08-17d';
 
   try {
     // 自動アップ未設定なら最初に登録ボタンを出す(店外でも設定だけ可能)
