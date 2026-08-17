@@ -263,13 +263,76 @@
         s.dedama += (h.dedama || 0);
         s.hits++;
       } else {
-        sets.push({ firstStart: h.start, dedama: h.dedama || 0, hits: 1 });
+        sets.push({ firstStart: h.start, firstDedama: h.dedama || 0, dedama: h.dedama || 0, hits: 1, time: h.time });
       }
     });
     return sets;
   }
 
   // 挙動指標: 単発率・平均獲得・早当り(ゾーン)・天井回数
+    // 機種別チェック(すろらぼルール)を履歴に適用する
+  // 返り値: marks=表示用の所見、extra=設定推測に組み込む追加観測(観測数k/試行n/設定別確率)
+  function runChecks(m, spec) {
+    var res = { marks: [], extra: [] };
+    if (!spec || !spec.checks) return res;
+    var sets = computeSets(m);
+    spec.checks.forEach(function (c) {
+      if (c.type === 'zones') {
+        if (!sets.length) return;
+        var k = sets.filter(function (s) {
+          return c.zones.some(function (z) { return s.firstStart >= z[0] && s.firstStart <= z[1]; });
+        }).length;
+        var share = k / sets.length;
+        res.marks.push({ label: c.label, text: k + '/' + sets.length,
+          dir: share >= (c.goodShare || 0.3) ? 1 : (share <= (c.badShare || 0.1) ? -1 : 0) });
+      } else if (c.type === 'pins') {
+        var hits = [];
+        sets.forEach(function (s) {
+          c.pins.forEach(function (p) { if (Math.abs(s.firstStart - p) <= (c.tol || 2)) hits.push(s.firstStart); });
+        });
+        if (hits.length) res.marks.push({ label: c.label, text: hits.join('/') + 'G!', dir: 1 });
+      } else if (c.type === 'firstDedamaSplit') {
+        if (sets.length < 3) return;
+        var kb = sets.filter(function (s) { return s.firstDedama >= c.threshold; }).length;
+        res.marks.push({ label: c.label, text: kb + '/' + sets.length,
+          dir: kb / sets.length >= c.midShare ? 1 : -1 });
+        res.extra.push({ k: kb, n: sets.length, probs: c.probs });
+      } else if (c.type === 'lateATsignal') {
+        var kd = 0;
+        (m.history || []).forEach(function (h) {
+          if (h.type === 'RB' && h.start >= c.minStart && !(h.start >= c.excl[0] && h.start <= c.excl[1])) kd++;
+        });
+        var nd = Math.max(sets.length, kd, 1);
+        res.marks.push({ label: c.label, text: kd + '回', dir: kd >= 2 ? 1 : 0 });
+        res.extra.push({ k: kd, n: nd, probs: c.probs });
+      } else if (c.type === 'parity') {
+        if (!sets.length) return;
+        var ke = sets.filter(function (s) { return Math.floor(s.firstStart / 100) % 2 === 0; }).length;
+        res.marks.push({ label: c.label, text: '偶数帯' + ke + '/' + sets.length, dir: 0 });
+      } else if (c.type === 'bigRegBias') {
+        var bb = m.bb || 0, rb = m.rb || 0;
+        if (bb + rb >= 8) {
+          var r = bb / (bb + rb);
+          res.marks.push({ label: c.label, text: Math.round(r * 100) + '%',
+            dir: r >= 0.55 ? 1 : (r <= 0.45 ? -1 : 0) });
+        }
+      } else if (c.type === 'renchan') {
+        if (sets.length < 3) return;
+        var kr = sets.filter(function (s) { return s.hits > 1; }).length;
+        var sr = kr / sets.length;
+        res.marks.push({ label: c.label, text: kr + '/' + sets.length,
+          dir: sr >= (c.good || 0.45) ? 1 : (sr <= (c.bad || 0.22) ? -1 : 0) });
+      }
+    });
+    return res;
+  }
+  function marksText(marks) {
+    if (!marks || !marks.length) return '';
+    return ' | ' + marks.map(function (mk) {
+      return mk.label + mk.text + (mk.dir > 0 ? '↑' : (mk.dir < 0 ? '↓' : ''));
+    }).join(' ');
+  }
+  
   function extrasText(m, spec) {
     var sets = computeSets(m);
     if (!sets.length) return '';
@@ -306,11 +369,16 @@
     }
     return best;
   }
-  function atPosterior(spec, col, k, n) {
+  function atPosterior(spec, col, k, n, extra) {
     var labels = atLabels(spec);
     var lls = labels.map(function (s) {
       var p = 1 / spec.s[s][col];
-      return k * Math.log(p) + (n - k) * Math.log(1 - p);
+      var ll = k * Math.log(p) + (n - k) * Math.log(1 - p);
+      (extra || []).forEach(function (e) {
+        var pe = e.probs && e.probs[s];
+        if (pe != null && e.n > 0) ll += e.k * Math.log(pe) + (e.n - e.k) * Math.log(1 - pe);
+      });
+      return ll;
     });
     var mx = Math.max.apply(null, lls);
     var ws = lls.map(function (l) { return Math.exp(l - mx); });
@@ -365,8 +433,9 @@
       if (obsDen < minD / 1.35 || obsDen > maxD * 1.35) return;
       acceptedAt[name] = 1;
       g.forEach(function (x) {
-        var r = atPosterior(spec, col, x.hits, x.m.totalStart);
-        scores[x.m.daiban] = { kind: 'pa', p56: r.p56, p456: r.p456, hits: x.hits, col: col };
+        var ch = runChecks(x.m, spec);
+        var r = atPosterior(spec, col, x.hits, x.m.totalStart, ch.extra);
+        scores[x.m.daiban] = { kind: 'pa', p56: r.p56, p456: r.p456, hits: x.hits, col: col, marks: ch.marks };
       });
     });
     // スペックが無い/スケール不一致の機種: 同機種内比較(z値)
@@ -430,7 +499,7 @@
       logStrong(mark + ' 台' + m.daiban + ' ' + shortName(m) +
         ' G' + m.totalStart + ' 初当り' + s.hits + '(1/' + Math.round(m.totalStart / s.hits) + ')' +
         ' 高設定' + Math.round(s.p56 * 100) + '%(設4以上' + Math.round(s.p456 * 100) + '%)' +
-        extrasText(m, window.__slotAtspecs && window.__slotAtspecs[m.kishuName]),
+        extrasText(m, window.__slotAtspecs && window.__slotAtspecs[m.kishuName]) + marksText(s.marks),
         s.p56 >= 0.45 ? '#f66' : '#0cf');
     });
     if (!pa.length) logStrong('(対象データなし)', '#0cf');
@@ -827,7 +896,7 @@
 
   // ---- メイン ----
 
-  var VERSION = '2026-08-17b';
+  var VERSION = '2026-08-17c';
 
   try {
     // 自動アップ未設定なら最初に登録ボタンを出す(店外でも設定だけ可能)
