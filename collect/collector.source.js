@@ -88,6 +88,11 @@
   var lastMachines = null;
   var lastScores = null;
 
+  // AT機の設定別スペック(すろらぼ由来)を先読みしておく
+  var atspecsPromise = fetch('https://raw.githubusercontent.com/iga89koshi-art/slot-app/main/collect/atspecs.json', { cache: 'no-store' })
+    .then(function (r) { return r.ok ? r.json() : {}; })
+    .catch(function () { return {}; });
+
   var box = document.createElement('div');
   box.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.92);color:#0f0;font:12px/1.5 monospace;padding:10px;overflow:auto;';
   var topBar = document.createElement('div');
@@ -243,7 +248,44 @@
   }
 
   // 台番 → スコア({kind:'p',p56,p456} または {kind:'z',z,hits,avgDen})
-  function computeScores(machines) {
+  // AT機スペック(すろらぼ由来)のヘルパー
+  // spec.s = {設定番号: [列1の分母, 列2の分母, ...]} 列はCZ確率/AT確率など複数系統
+  function atLabels(spec) {
+    return Object.keys(spec.s).map(Number).sort(function (a, b) { return a - b; });
+  }
+  // データサイトの実測初当り(連チャンマージ後)のスケールに最も近い列を選ぶ
+  function chooseCol(spec, obsDen) {
+    var labels = atLabels(spec);
+    var best = 0, bestDiff = Infinity;
+    for (var c = 0; c < spec.cols; c++) {
+      var sum = 0;
+      labels.forEach(function (s) { sum += spec.s[s][c]; });
+      var mean = sum / labels.length;
+      var diff = Math.abs(Math.log(obsDen) - Math.log(mean));
+      if (diff < bestDiff) { bestDiff = diff; best = c; }
+    }
+    return best;
+  }
+  function atPosterior(spec, col, k, n) {
+    var labels = atLabels(spec);
+    var lls = labels.map(function (s) {
+      var p = 1 / spec.s[s][col];
+      return k * Math.log(p) + (n - k) * Math.log(1 - p);
+    });
+    var mx = Math.max.apply(null, lls);
+    var ws = lls.map(function (l) { return Math.exp(l - mx); });
+    var sum = ws.reduce(function (a, b) { return a + b; }, 0);
+    var p56 = 0, p456 = 0;
+    labels.forEach(function (s, i) {
+      var p = ws[i] / sum;
+      if (s >= 5) p56 += p;
+      if (s >= 4) p456 += p;
+    });
+    return { p56: p56, p456: p456 };
+  }
+
+  function computeScores(machines, atspecs) {
+    atspecs = atspecs || {};
     var scores = {};
     machines.forEach(function (m) {
       var spec = SPECS[m.kishuName];
@@ -252,9 +294,39 @@
         scores[m.daiban] = { kind: 'p', p56: r.p56, p456: r.p456 };
       }
     });
+    // すろらぼスペックのある機種: 初当り確率のベイズ推定
+    var atGroups = {};
+    machines.forEach(function (m) {
+      if (SPECS[m.kishuName] || !atspecs[m.kishuName]) return;
+      if (m.totalStart == null || m.totalStart < MIN_GAMES_RANK) return;
+      var hits = firstHits(m);
+      if (!hits) return;
+      (atGroups[m.kishuName] = atGroups[m.kishuName] || []).push({ m: m, hits: hits });
+    });
+    var acceptedAt = {};
+    Object.keys(atGroups).forEach(function (name) {
+      var spec = atspecs[name];
+      var g = atGroups[name];
+      var sumH = 0, sumG = 0;
+      g.forEach(function (x) { sumH += x.hits; sumG += x.m.totalStart; });
+      var obsDen = sumG / sumH;
+      var col = chooseCol(spec, obsDen);
+      // 安全弁: 実測の初当りスケールがスペックの設定1〜6の範囲から大きく外れる場合は
+      // 数え方が合っていない(スペックが直撃系の数値等)とみなし、この機種は判定しない
+      var labels = atLabels(spec);
+      var dens = labels.map(function (s) { return spec.s[s][col]; });
+      var minD = Math.min.apply(null, dens), maxD = Math.max.apply(null, dens);
+      if (obsDen < minD / 1.35 || obsDen > maxD * 1.35) return;
+      acceptedAt[name] = 1;
+      g.forEach(function (x) {
+        var r = atPosterior(spec, col, x.hits, x.m.totalStart);
+        scores[x.m.daiban] = { kind: 'pa', p56: r.p56, p456: r.p456, hits: x.hits, col: col };
+      });
+    });
+    // スペックが無い/スケール不一致の機種: 同機種内比較(z値)
     var groups = {};
     machines.forEach(function (m) {
-      if (SPECS[m.kishuName]) return;
+      if (SPECS[m.kishuName] || acceptedAt[m.kishuName]) return;
       if (m.totalStart == null || m.totalStart < MIN_GAMES_RANK) return;
       var hits = firstHits(m);
       if (!hits) return;
@@ -280,11 +352,13 @@
   function scoreText(m, s) {
     if (!s) return '';
     if (s.kind === 'p') return ' 高設定' + Math.round(s.p56 * 100) + '%';
+    if (s.kind === 'pa') return ' 初当り' + s.hits + '(1/' + Math.round(m.totalStart / s.hits) + ') 高設定' + Math.round(s.p56 * 100) + '%';
     return ' 初当り' + s.hits + '(1/' + Math.round(m.totalStart / s.hits) + ') 機種平均1/' + s.avgDen + ' 優秀度' + (s.z >= 0 ? '+' : '') + s.z.toFixed(1);
   }
   function sortKey(s) {
     if (!s) return -99;
-    return s.kind === 'p' ? s.p56 * 10 : s.z; // 高設定確率とz値をざっくり同スケール化
+    if (s.kind === 'z') return s.z;
+    return s.p56 * 10; // 高設定確率とz値をざっくり同スケール化
   }
 
   function renderRankings(machines, scores) {
@@ -301,12 +375,28 @@
     });
     if (!jr.length) logStrong('(対象データなし)');
 
+    var pa = machines.filter(function (m) { return scores[m.daiban] && scores[m.daiban].kind === 'pa'; })
+      .sort(function (a, b) { return scores[b.daiban].p56 - scores[a.daiban].p56; });
+    logStrong('== AT機 高設定候補(すろらぼ基準・設5以上確率順) ==', '#0cf');
+    pa.slice(0, 15).forEach(function (m) {
+      var s = scores[m.daiban];
+      var mark = s.p56 >= 0.45 ? '★' : (s.p56 >= 0.3 ? '◯' : '　');
+      logStrong(mark + ' 台' + m.daiban + ' ' + shortName(m) +
+        ' G' + m.totalStart + ' 初当り' + s.hits + '(1/' + Math.round(m.totalStart / s.hits) + ')' +
+        ' 高設定' + Math.round(s.p56 * 100) + '%(設4以上' + Math.round(s.p456 * 100) + '%)',
+        s.p56 >= 0.45 ? '#f66' : '#0cf');
+    });
+    if (!pa.length) logStrong('(対象データなし)', '#0cf');
+
     var at = machines.filter(function (m) { return scores[m.daiban] && scores[m.daiban].kind === 'z'; })
       .sort(function (a, b) { return scores[b.daiban].z - scores[a.daiban].z; });
-    logStrong('== AT機など 同機種内で初当りが強い台(参考) ==', '#0cf');
-    at.filter(function (m) { return scores[m.daiban].z >= 1; }).slice(0, 10).forEach(function (m) {
-      logStrong('　台' + m.daiban + ' ' + shortName(m) + ' G' + m.totalStart + scoreText(m, scores[m.daiban]), '#0cf');
-    });
+    var atTop = at.filter(function (m) { return scores[m.daiban].z >= 1; }).slice(0, 8);
+    if (atTop.length) {
+      logStrong('== スペック未登録機種 同機種内で初当りが強い台(参考) ==', '#0cf');
+      atTop.forEach(function (m) {
+        logStrong('　台' + m.daiban + ' ' + shortName(m) + ' G' + m.totalStart + scoreText(m, scores[m.daiban]), '#0cf');
+      });
+    }
   }
 
   // ---- ヒント ----
@@ -409,11 +499,12 @@
     });
   }
 
-  // 好調判定: ジャグラーは高設定確率40%以上、AT機は初当りz値1.0以上
+  // 好調判定: スペックあり機種は高設定確率40%以上、スペックなしは初当りz値1.0以上
   function isGood(m, scores) {
     var s = scores[m.daiban];
     if (!s) return false;
-    return s.kind === 'p' ? s.p56 >= 0.4 : s.z >= 1.0;
+    if (s.kind === 'z') return s.z >= 1.0;
+    return s.p56 >= 0.4;
   }
 
   // 機種別サマリー: 全台系・1/2配分の検出用
@@ -432,11 +523,16 @@
       var sumHits = 0, sumG = 0;
       g.ms.forEach(function (m) { sumHits += firstHits(m); sumG += m.totalStart; });
       var spec = SPECS[g.name];
+      var atspec = window.__slotAtspecs && window.__slotAtspecs[g.name];
       var pooled = '';
       if (spec) {
         var agg = { bb: 0, rb: 0, totalStart: 0 };
         g.ms.forEach(function (m) { agg.bb += m.bb || 0; agg.rb += m.rb || 0; agg.totalStart += m.totalStart; });
         pooled = ' 機種全体高設定' + Math.round(posterior56(agg, spec).p56 * 100) + '%';
+      } else if (atspec && sumHits) {
+        var col = chooseCol(atspec, sumG / sumHits);
+        pooled = ' 初当り合算1/' + Math.round(sumG / sumHits) +
+          ' 機種全体高設定' + Math.round(atPosterior(atspec, col, sumHits, sumG).p56 * 100) + '%';
       } else if (sumHits) {
         pooled = ' 初当り合算1/' + Math.round(sumG / sumHits);
       }
@@ -709,7 +805,8 @@
 
     log('== 取得完了: ' + machines.length + '台 ==');
     lastMachines = machines;
-    lastScores = computeScores(machines);
+    window.__slotAtspecs = await atspecsPromise;
+    lastScores = computeScores(machines, window.__slotAtspecs);
 
     var hints = await getMergedHints(date);
     if (hints) renderHints(machines, lastScores, hints);

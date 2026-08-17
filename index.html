@@ -145,6 +145,40 @@ function firstHits(m) {
   hist.forEach(function (h, idx) { if (idx === 0 || h.start > 33) hits++; });
   return hits;
 }
+// AT機スペック(すろらぼ由来)のヘルパー
+var ATSPECS = {};
+function atLabels(spec) {
+  return Object.keys(spec.s).map(Number).sort(function (a, b) { return a - b; });
+}
+function chooseCol(spec, obsDen) {
+  var labels = atLabels(spec);
+  var best = 0, bestDiff = Infinity;
+  for (var c = 0; c < spec.cols; c++) {
+    var sum = 0;
+    labels.forEach(function (s) { sum += spec.s[s][c]; });
+    var diff = Math.abs(Math.log(obsDen) - Math.log(sum / labels.length));
+    if (diff < bestDiff) { bestDiff = diff; best = c; }
+  }
+  return best;
+}
+function atPosterior(spec, col, k, n) {
+  var labels = atLabels(spec);
+  var lls = labels.map(function (s) {
+    var p = 1 / spec.s[s][col];
+    return k * Math.log(p) + (n - k) * Math.log(1 - p);
+  });
+  var mx = Math.max.apply(null, lls);
+  var ws = lls.map(function (l) { return Math.exp(l - mx); });
+  var sum = ws.reduce(function (a, b) { return a + b; }, 0);
+  var p56 = 0, p456 = 0;
+  labels.forEach(function (s, i) {
+    var p = ws[i] / sum;
+    if (s >= 5) p56 += p;
+    if (s >= 4) p456 += p;
+  });
+  return { p56: p56, p456: p456 };
+}
+
 function computeScores(machines) {
   var scores = {};
   machines.forEach(function (m) {
@@ -154,9 +188,35 @@ function computeScores(machines) {
       scores[m.daiban] = { kind: 'p', p56: r.p56, p456: r.p456 };
     }
   });
+  // すろらぼスペックのある機種: 初当り確率のベイズ推定(スケール不一致は除外)
+  var atGroups = {};
+  machines.forEach(function (m) {
+    if (SPECS[m.kishuName] || !ATSPECS[m.kishuName]) return;
+    if (m.totalStart == null || m.totalStart < MIN_GAMES_RANK) return;
+    var hits = firstHits(m);
+    if (!hits) return;
+    (atGroups[m.kishuName] = atGroups[m.kishuName] || []).push({ m: m, hits: hits });
+  });
+  var acceptedAt = {};
+  Object.keys(atGroups).forEach(function (name) {
+    var spec = ATSPECS[name];
+    var g = atGroups[name];
+    var sumH = 0, sumG = 0;
+    g.forEach(function (x) { sumH += x.hits; sumG += x.m.totalStart; });
+    var obsDen = sumG / sumH;
+    var col = chooseCol(spec, obsDen);
+    var dens = atLabels(spec).map(function (s) { return spec.s[s][col]; });
+    var minD = Math.min.apply(null, dens), maxD = Math.max.apply(null, dens);
+    if (obsDen < minD / 1.35 || obsDen > maxD * 1.35) return;
+    acceptedAt[name] = 1;
+    g.forEach(function (x) {
+      var r = atPosterior(spec, col, x.hits, x.m.totalStart);
+      scores[x.m.daiban] = { kind: 'pa', p56: r.p56, p456: r.p456, hits: x.hits };
+    });
+  });
   var groups = {};
   machines.forEach(function (m) {
-    if (SPECS[m.kishuName]) return;
+    if (SPECS[m.kishuName] || acceptedAt[m.kishuName]) return;
     if (m.totalStart == null || m.totalStart < MIN_GAMES_RANK) return;
     var hits = firstHits(m);
     if (!hits) return;
@@ -178,7 +238,8 @@ function computeScores(machines) {
 function isGood(m, scores) {
   var s = scores[m.daiban];
   if (!s) return false;
-  return s.kind === 'p' ? s.p56 >= 0.4 : s.z >= 1.0;
+  if (s.kind === 'z') return s.z >= 1.0;
+  return s.p56 >= 0.4;
 }
 function shortName(m) { return m.kishuName.replace(/^(LB|L|S)/, ''); }
 
@@ -237,14 +298,14 @@ function render(data, hints) {
     });
     matched.sort(function (a, b) {
       var sa = scores[a.m.daiban], sb = scores[b.m.daiban];
-      var ka = sa ? (sa.kind === 'p' ? sa.p56 * 10 : sa.z) : -99;
-      var kb = sb ? (sb.kind === 'p' ? sb.p56 * 10 : sb.z) : -99;
+      var ka = sa ? (sa.kind === 'z' ? sa.z : sa.p56 * 10) : -99;
+      var kb = sb ? (sb.kind === 'z' ? sb.z : sb.p56 * 10) : -99;
       return kb - ka;
     });
     sh.appendChild(table(['台', '機種', 'G数', '合成', '評価', '該当理由'],
       matched.slice(0, 25).map(function (x) {
         var m = x.m, s = scores[m.daiban];
-        var ev = !s ? '-' : (s.kind === 'p' ? '高設定' + Math.round(s.p56 * 100) + '%' : '優秀度' + (s.z >= 0 ? '+' : '') + s.z.toFixed(1));
+        var ev = !s ? '-' : (s.kind === 'z' ? '優秀度' + (s.z >= 0 ? '+' : '') + s.z.toFixed(1) : '高設定' + Math.round(s.p56 * 100) + '%');
         return [m.daiban, shortName(m), m.totalStart, m.gousei ? '1/' + m.gousei : '-',
           { text: ev, cls: isGood(m, scores) ? 'hot' : '' }, x.reasons.join(',')];
       })));
@@ -266,18 +327,36 @@ function render(data, hints) {
     })));
   out.appendChild(sj);
 
-  // AT機
+  // AT機(すろらぼ基準の設定推測)
+  var pa = machines.filter(function (m) { return scores[m.daiban] && scores[m.daiban].kind === 'pa'; })
+    .sort(function (a, b) { return scores[b.daiban].p56 - scores[a.daiban].p56; });
+  var sp = section('h-at', 'AT機 高設定候補(すろらぼ基準・設5以上確率順)');
+  sp.appendChild(table(['台', '機種', 'G数', '初当り', '設5以上', '設4以上'],
+    pa.slice(0, 20).map(function (m) {
+      var s = scores[m.daiban];
+      var p = Math.round(s.p56 * 100);
+      return [m.daiban, shortName(m), m.totalStart,
+        s.hits + '(1/' + Math.round(m.totalStart / s.hits) + ')',
+        { text: p + '%', cls: p >= 45 ? 'hot' : (p >= 30 ? 'warm' : '') },
+        Math.round(s.p456 * 100) + '%'];
+    })));
+  out.appendChild(sp);
+
+  // スペック未登録機種(同機種内比較)
   var at = machines.filter(function (m) { return scores[m.daiban] && scores[m.daiban].kind === 'z'; })
     .sort(function (a, b) { return scores[b.daiban].z - scores[a.daiban].z; });
-  var sa = section('h-at', 'AT機など 同機種内で初当りが強い台');
-  sa.appendChild(table(['台', '機種', 'G数', '初当り', '機種平均', '優秀度'],
-    at.filter(function (m) { return scores[m.daiban].z >= 1; }).slice(0, 15).map(function (m) {
-      var s = scores[m.daiban];
-      return [m.daiban, shortName(m), m.totalStart,
-        s.hits + '(1/' + Math.round(m.totalStart / s.hits) + ')', '1/' + s.avgDen,
-        { text: '+' + s.z.toFixed(1), cls: s.z >= 2 ? 'hot' : 'warm' }];
-    })));
-  out.appendChild(sa);
+  var atTop = at.filter(function (m) { return scores[m.daiban].z >= 1; }).slice(0, 10);
+  if (atTop.length) {
+    var sa = section('h-at', 'スペック未登録機種 同機種内で初当りが強い台(参考)');
+    sa.appendChild(table(['台', '機種', 'G数', '初当り', '機種平均', '優秀度'],
+      atTop.map(function (m) {
+        var s = scores[m.daiban];
+        return [m.daiban, shortName(m), m.totalStart,
+          s.hits + '(1/' + Math.round(m.totalStart / s.hits) + ')', '1/' + s.avgDen,
+          { text: '+' + s.z.toFixed(1), cls: s.z >= 2 ? 'hot' : 'warm' }];
+      })));
+    out.appendChild(sa);
+  }
 
   // 機種別サマリー
   var groups = {};
@@ -293,6 +372,7 @@ function render(data, hints) {
     if (!good.length) return;
     var pooled = '';
     var spec = SPECS[g.name];
+    var atspec = ATSPECS[g.name];
     if (spec) {
       var agg = { bb: 0, rb: 0, totalStart: 0 };
       g.ms.forEach(function (m) { agg.bb += m.bb || 0; agg.rb += m.rb || 0; agg.totalStart += m.totalStart; });
@@ -300,7 +380,17 @@ function render(data, hints) {
     } else {
       var sumH = 0, sumG = 0;
       g.ms.forEach(function (m) { sumH += firstHits(m); sumG += m.totalStart; });
-      if (sumH) pooled = '初当り合算1/' + Math.round(sumG / sumH);
+      if (sumH) {
+        pooled = '初当り合算1/' + Math.round(sumG / sumH);
+        if (atspec) {
+          var col = chooseCol(atspec, sumG / sumH);
+          var dens = atLabels(atspec).map(function (s) { return atspec.s[s][col]; });
+          var obsDen = sumG / sumH;
+          if (obsDen >= Math.min.apply(null, dens) / 1.35 && obsDen <= Math.max.apply(null, dens) * 1.35) {
+            pooled += ' 機種全体高設定' + Math.round(atPosterior(atspec, col, sumH, sumG).p56 * 100) + '%';
+          }
+        }
+      }
     }
     var ratio = good.length / g.ms.length;
     rows.push({ name: g.name, n: g.ms.length, good: good.length, ratio: ratio, pooled: pooled, d: good.map(function (m) { return m.daiban; }) });
@@ -384,7 +474,12 @@ function loadSnap(file) {
     document.getElementById('out').textContent = '読み込み失敗: ' + e.message;
   });
 }
-fetch('collect/hints.json', { cache: 'no-store' }).then(function (r) { return r.json(); })
+fetch('collect/atspecs.json', { cache: 'no-store' }).then(function (r) { return r.json(); })
+  .then(function (a) { ATSPECS = a || {}; })
+  .catch(function () { })
+  .then(function () {
+    return fetch('collect/hints.json', { cache: 'no-store' }).then(function (r) { return r.json(); });
+  })
   .then(function (h) { hintsCache = h; })
   .catch(function () { })
   .then(function () {
