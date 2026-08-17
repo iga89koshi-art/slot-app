@@ -247,6 +247,41 @@
     return hits;
   }
 
+  // 連チャンを一塊にしたセット一覧(初当りG数・獲得枚数)
+  function computeSets(m) {
+    if (!m.history || !m.history.length) return [];
+    var hist = m.history.slice().sort(function (a, b) { return a.no - b.no; });
+    var sets = [];
+    hist.forEach(function (h) {
+      if (sets.length && h.start <= 33) {
+        var s = sets[sets.length - 1];
+        s.dedama += (h.dedama || 0);
+        s.hits++;
+      } else {
+        sets.push({ firstStart: h.start, dedama: h.dedama || 0, hits: 1 });
+      }
+    });
+    return sets;
+  }
+
+  // 挙動指標: 単発率・平均獲得・早当り(ゾーン)・天井回数
+  function extrasText(m, spec) {
+    var sets = computeSets(m);
+    if (!sets.length) return '';
+    var tan = sets.filter(function (s) { return s.hits === 1; }).length;
+    var avg = Math.round(sets.reduce(function (a, s) { return a + s.dedama; }, 0) / sets.length);
+    var t = ' 単発' + Math.round(100 * tan / sets.length) + '% 平均' + avg + '枚';
+    if (spec && spec.fastG) {
+      var f = sets.filter(function (s) { return s.firstStart <= spec.fastG; }).length;
+      t += ' 早当り' + f + '/' + sets.length;
+    }
+    if (spec && spec.tenjoG) {
+      var tj = sets.filter(function (s) { return s.firstStart >= spec.tenjoG - 64; }).length;
+      if (tj) t += ' 天井' + tj + '回';
+    }
+    return t;
+  }
+
   // 台番 → スコア({kind:'p',p56,p456} または {kind:'z',z,hits,avgDen})
   // AT機スペック(すろらぼ由来)のヘルパー
   // spec.s = {設定番号: [列1の分母, 列2の分母, ...]} 列はCZ確率/AT確率など複数系統
@@ -310,6 +345,12 @@
       var sumH = 0, sumG = 0;
       g.forEach(function (x) { sumH += x.hits; sumG += x.m.totalStart; });
       var obsDen = sumG / sumH;
+      // 平均獲得が極端に小さい場合はCZ等の小信号を数えているとみなし判定しない
+      var dedamaSum = 0, setCnt = 0;
+      g.forEach(function (x) {
+        computeSets(x.m).forEach(function (st) { dedamaSum += st.dedama; setCnt++; });
+      });
+      if (setCnt && dedamaSum / setCnt < 40) return;
       var col = chooseCol(spec, obsDen);
       // 安全弁: 実測の初当りスケールがスペックの設定1〜6の範囲から大きく外れる場合は
       // 数え方が合っていない(スペックが直撃系の数値等)とみなし、この機種は判定しない
@@ -383,7 +424,8 @@
       var mark = s.p56 >= 0.45 ? '★' : (s.p56 >= 0.3 ? '◯' : '　');
       logStrong(mark + ' 台' + m.daiban + ' ' + shortName(m) +
         ' G' + m.totalStart + ' 初当り' + s.hits + '(1/' + Math.round(m.totalStart / s.hits) + ')' +
-        ' 高設定' + Math.round(s.p56 * 100) + '%(設4以上' + Math.round(s.p456 * 100) + '%)',
+        ' 高設定' + Math.round(s.p56 * 100) + '%(設4以上' + Math.round(s.p456 * 100) + '%)' +
+        extrasText(m, window.__slotAtspecs && window.__slotAtspecs[m.kishuName]),
         s.p56 >= 0.45 ? '#f66' : '#0cf');
     });
     if (!pa.length) logStrong('(対象データなし)', '#0cf');

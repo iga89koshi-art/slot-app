@@ -145,6 +145,37 @@ function firstHits(m) {
   hist.forEach(function (h, idx) { if (idx === 0 || h.start > 33) hits++; });
   return hits;
 }
+function computeSets(m) {
+  if (!m.history || !m.history.length) return [];
+  var hist = m.history.slice().sort(function (a, b) { return a.no - b.no; });
+  var sets = [];
+  hist.forEach(function (h) {
+    if (sets.length && h.start <= 33) {
+      var s = sets[sets.length - 1];
+      s.dedama += (h.dedama || 0);
+      s.hits++;
+    } else {
+      sets.push({ firstStart: h.start, dedama: h.dedama || 0, hits: 1 });
+    }
+  });
+  return sets;
+}
+function extrasText(m, spec) {
+  var sets = computeSets(m);
+  if (!sets.length) return '';
+  var tan = sets.filter(function (s) { return s.hits === 1; }).length;
+  var avg = Math.round(sets.reduce(function (a, s) { return a + s.dedama; }, 0) / sets.length);
+  var t = '単発' + Math.round(100 * tan / sets.length) + '% 平均' + avg + '枚';
+  if (spec && spec.fastG) {
+    var f = sets.filter(function (s) { return s.firstStart <= spec.fastG; }).length;
+    t += ' 早当り' + f + '/' + sets.length;
+  }
+  if (spec && spec.tenjoG) {
+    var tj = sets.filter(function (s) { return s.firstStart >= spec.tenjoG - 64; }).length;
+    if (tj) t += ' 天井' + tj + '回';
+  }
+  return t;
+}
 // AT機スペック(すろらぼ由来)のヘルパー
 var ATSPECS = {};
 function atLabels(spec) {
@@ -204,6 +235,12 @@ function computeScores(machines) {
     var sumH = 0, sumG = 0;
     g.forEach(function (x) { sumH += x.hits; sumG += x.m.totalStart; });
     var obsDen = sumG / sumH;
+    // 平均獲得が極端に小さい場合はCZ等の小信号を数えているとみなし判定しない
+    var dedamaSum = 0, setCnt = 0;
+    g.forEach(function (x) {
+      computeSets(x.m).forEach(function (st) { dedamaSum += st.dedama; setCnt++; });
+    });
+    if (setCnt && dedamaSum / setCnt < 40) return;
     var col = chooseCol(spec, obsDen);
     var dens = atLabels(spec).map(function (s) { return spec.s[s][col]; });
     var minD = Math.min.apply(null, dens), maxD = Math.max.apply(null, dens);
@@ -331,14 +368,15 @@ function render(data, hints) {
   var pa = machines.filter(function (m) { return scores[m.daiban] && scores[m.daiban].kind === 'pa'; })
     .sort(function (a, b) { return scores[b.daiban].p56 - scores[a.daiban].p56; });
   var sp = section('h-at', 'AT機 高設定候補(すろらぼ基準・設5以上確率順)');
-  sp.appendChild(table(['台', '機種', 'G数', '初当り', '設5以上', '設4以上'],
+  sp.appendChild(table(['台', '機種', 'G数', '初当り', '設5以上', '設4以上', '挙動(単発率/平均獲得/ゾーン)'],
     pa.slice(0, 20).map(function (m) {
       var s = scores[m.daiban];
       var p = Math.round(s.p56 * 100);
       return [m.daiban, shortName(m), m.totalStart,
         s.hits + '(1/' + Math.round(m.totalStart / s.hits) + ')',
         { text: p + '%', cls: p >= 45 ? 'hot' : (p >= 30 ? 'warm' : '') },
-        Math.round(s.p456 * 100) + '%'];
+        Math.round(s.p456 * 100) + '%',
+        extrasText(m, ATSPECS[m.kishuName])];
     })));
   out.appendChild(sp);
 
@@ -446,6 +484,31 @@ function render(data, hints) {
     sr.appendChild(el('div', 'note', '検出なし'));
   }
   out.appendChild(sr);
+
+  // 機種別の判別メモ(すろらぼ由来・データサイトで見える要素のみ)
+  var noteNames = {};
+  machines.forEach(function (m) {
+    if (ATSPECS[m.kishuName] && ATSPECS[m.kishuName].note && !noteNames[m.kishuName]) {
+      noteNames[m.kishuName] = ATSPECS[m.kishuName].note;
+    }
+  });
+  var names = Object.keys(noteNames);
+  if (names.length) {
+    var dt = document.createElement('details');
+    var sm2 = document.createElement('summary');
+    sm2.textContent = '機種別の判別メモ(すろらぼ・履歴の見方)';
+    dt.appendChild(sm2);
+    var ul2 = el('ul');
+    names.forEach(function (n) {
+      var li = el('li');
+      var b = el('strong', null, n.replace(/^(LB|L|S)/, '') + ': ');
+      li.appendChild(b);
+      li.appendChild(document.createTextNode(noteNames[n]));
+      ul2.appendChild(li);
+    });
+    dt.appendChild(ul2);
+    out.appendChild(dt);
+  }
 }
 
 // ==== データ読み込み ====
