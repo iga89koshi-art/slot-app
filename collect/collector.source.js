@@ -286,11 +286,17 @@
           dir: c.neutral ? 0 : (share >= (c.goodShare || 0.3) ? 1 : (share <= (c.badShare || 0.1) ? -1 : 0)) });
         if (c.probs && sets.length >= 3) res.extra.push({ k: k, n: sets.length, probs: c.probs });
       } else if (c.type === 'pins') {
+        // 仮天井・短縮天井: 到達Gから最大zenchouG(前兆)遅れて履歴に載る。zenchouは最大値なので窓全体を許容
         var hits = [];
         sets.forEach(function (s) {
-          c.pins.forEach(function (p) { if (Math.abs(s.firstStart - p) <= (c.tol || 2)) hits.push(s.firstStart); });
+          var cand = null;
+          c.pins.forEach(function (p) {
+            var fwd = (c.zenchou != null) ? c.zenchou : (c.tol || 2);
+            if (s.firstStart >= p - (c.tol || 2) && s.firstStart <= p + fwd && (cand == null || p > cand)) cand = p;
+          });
+          if (cand != null) hits.push(s.firstStart > cand ? cand + '+' + (s.firstStart - cand) + 'G' : s.firstStart + 'G');
         });
-        if (hits.length) res.marks.push({ label: c.label, text: hits.join('/') + 'G!', dir: 1 });
+        if (hits.length) res.marks.push({ label: c.label, text: hits.join('/'), dir: 1 });
       } else if (c.type === 'firstDedamaSplit') {
         if (sets.length < 3) return;
         var kb = sets.filter(function (s) { return s.firstDedama >= c.threshold; }).length;
@@ -945,7 +951,7 @@
 
   // ---- メイン ----
 
-  var VERSION = '2026-08-17d';
+  var VERSION = '2026-08-17e';
 
   try {
     // 自動アップ未設定なら最初に登録ボタンを出す(店外でも設定だけ可能)
