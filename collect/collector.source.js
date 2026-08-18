@@ -130,7 +130,7 @@
   var stopBtn = document.createElement('button');
   stopBtn.textContent = '中止/閉じる';
   stopBtn.style.cssText = 'padding:10px 14px;font-size:14px;background:#c33;color:#fff;border:0;border-radius:6px;';
-  stopBtn.onclick = function () { aborted = true; box.remove(); window.__slotCollectorRunning = false; };
+  stopBtn.onclick = function () { aborted = true; autoRepeatMin = 0; if (repeatTimer) clearTimeout(repeatTimer); box.remove(); window.__slotCollectorRunning = false; };
   var logDiv = document.createElement('div');
   topBar.appendChild(setBtn);
   topBar.appendChild(hintBtn);
@@ -932,7 +932,7 @@
     logDiv.appendChild(b);
   }
 
-  async function ghUpload(payload, date) {
+  async function ghUpload(payload, date, note) {
     var token = localStorage.getItem('slot_gh_token') || '';
     if (!token) { showTokenSetup(); return false; }
     var now = new Date();
@@ -943,7 +943,9 @@
       { message: '収集データ ' + date + ' ' + hhmm, content: b64u(payload) }, token);
     var idx = await ghApi('/contents/data/index.json', 'GET', null, token);
     var list = JSON.parse(b64d(idx.content));
-    list.unshift({ file: fname, label: date.slice(5).replace('-', '/') + ' ' + hhmm.slice(0, 2) + ':' + hhmm.slice(2) + '時点' });
+    list.unshift({ file: fname, label: date.slice(5).replace('-', '/') + ' ' + hhmm.slice(0, 2) + ':' + hhmm.slice(2) + '時点' + (note || '') });
+    // 日付降順を保証(バックフィルで過去日を後からアップしても一覧が崩れないように)
+    list.sort(function (a, b) { return String(b.file || '').localeCompare(String(a.file || '')); });
     await ghApi('/contents/data/index.json', 'PUT',
       { message: 'データ一覧を更新 ' + fname, content: b64u(JSON.stringify(list, null, 1)), sha: idx.sha }, token);
     logStrong('✅ サイトへアップ完了。閲覧ページに数分で反映されます', '#6f6');
@@ -952,18 +954,81 @@
 
   // ---- メイン ----
 
-  var VERSION = '2026-08-17e';
+  var VERSION = '2026-08-18a';
 
+  // ---- 自動リピート収集・過去日バックフィル ----
+  var autoRepeatMin = 0;
+  var backfillActive = false;
+  var repeatTimer = null;
+  var followupsShown = false;
+
+  function scheduleAutoRepeat() {
+    if (!autoRepeatMin || aborted) return;
+    log('🔁 次回の自動収集まで' + autoRepeatMin + '分待機します(このタブを開いたまま・画面スリープOFF推奨)');
+    clearTimeout(repeatTimer);
+    repeatTimer = setTimeout(function () {
+      if (aborted || !autoRepeatMin) return;
+      if (backfillActive) { scheduleAutoRepeat(); return; }
+      runCollection();
+    }, autoRepeatMin * 60 * 1000);
+  }
+
+  async function backfillPastDays(days) {
+    backfillActive = true;
+    try {
+      var have = {};
+      try {
+        var idx = await (await fetch(RAW_BASE + 'data/index.json', { cache: 'no-store' })).json();
+        idx.forEach(function (e) { var m = (e.file || '').match(/(\d{4}-\d{2}-\d{2})/); if (m) have[m[1]] = 1; });
+      } catch (eI) { }
+      for (var d = 1; d <= days; d++) {
+        if (aborted) return;
+        var t = new Date(); t.setDate(t.getDate() - d);
+        var ds = t.getFullYear() + '-' + ('0' + (t.getMonth() + 1)).slice(-2) + '-' + ('0' + t.getDate()).slice(-2);
+        if (have[ds]) { log('⏪ ' + ds + ' は保存済みのためスキップ'); continue; }
+        logStrong('⏪ 過去日バックフィル: ' + ds + ' を収集します(' + d + '/' + days + '日前)', '#9cf');
+        var n = await runCollection(ds);
+        if (!n) { log('⏪ ' + ds + ' はデータが取れませんでした(過去日非対応の可能性)。バックフィルを中止します'); return; }
+      }
+      logStrong('⏪ バックフィル完了', '#6f6');
+    } finally {
+      backfillActive = false;
+      if (!autoRepeatMin) window.__slotCollectorRunning = false;
+    }
+  }
+
+  function offerFollowups() {
+    if (followupsShown) return;
+    followupsShown = true;
+    var mk = function (label, fn) {
+      var b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = 'display:block;width:100%;padding:12px;font-size:14px;background:#357;color:#fff;border:0;border-radius:6px;margin:8px 0;';
+      b.onclick = function () { b.disabled = true; b.style.opacity = '0.5'; fn(b); };
+      logDiv.appendChild(b);
+    };
+    mk('🔁 滞在中は15分ごとに自動収集する(画面ONのまま置く)', function (b) {
+      autoRepeatMin = 15;
+      b.textContent = '🔁 自動収集ON(15分ごと)。「中止/閉じる」で停止';
+      scheduleAutoRepeat();
+    });
+    mk('⏪ 過去6日分をまとめて収集(バックフィル・20〜30分)', function () {
+      backfillPastDays(6);
+    });
+  }
+
+  async function runCollection(dateOverride) {
   try {
     // 自動アップ未設定なら最初に登録ボタンを出す(店外でも設定だけ可能)
-    if (!localStorage.getItem('slot_gh_token')) {
+    if (!dateOverride && !localStorage.getItem('slot_gh_token')) {
       logStrong('サイト自動アップが未設定です。下のボタンでトークンを登録できます(店外でもOK)', '#f9c');
       showTokenSetup();
     }
-    var date = today();
-    var prevDayPromise = loadPrevDay(date);
-    // 台番キャッシュの古い日付分を掃除
-    try {
+    var date = dateOverride || today();
+    var isToday = !dateOverride;
+    var prevDayPromise = isToday ? loadPrevDay(date) : null;
+    // 台番キャッシュの古い日付分を掃除(今日の収集時のみ)
+    if (isToday) try {
       Object.keys(localStorage).forEach(function (key) {
         if (key.indexOf('slot_dai_') === 0 && key.indexOf('slot_dai_' + date) !== 0) localStorage.removeItem(key);
       });
@@ -1072,18 +1137,21 @@
     }
 
     log('== 取得完了: ' + machines.length + '台 ==');
-    lastMachines = machines;
-    window.__slotAtspecs = await atspecsPromise;
-    lastScores = computeScores(machines, window.__slotAtspecs);
-
-    var hints = await getMergedHints(date);
-    if (hints) renderHints(machines, lastScores, hints);
-    renderRankings(machines, lastScores);
-    renderKishuSummary(machines, lastScores, hints);
-    renderRuns(machines, lastScores);
-    var prevDay = await prevDayPromise;
-    if (prevDay) renderPrevCompare(machines, lastScores, prevDay, window.__slotAtspecs);
-    else logStrong('(前日データなし: 前日比較はスキップ)', '#fc6');
+    var validCount = machines.filter(function (m) { return m.totalStart != null || (m.history && m.history.length); }).length;
+    if (!isToday && !validCount) return 0;
+    if (isToday) {
+      lastMachines = machines;
+      window.__slotAtspecs = await atspecsPromise;
+      lastScores = computeScores(machines, window.__slotAtspecs);
+      var hints = await getMergedHints(date);
+      if (hints) renderHints(machines, lastScores, hints);
+      renderRankings(machines, lastScores);
+      renderKishuSummary(machines, lastScores, hints);
+      renderRuns(machines, lastScores);
+      var prevDay = await prevDayPromise;
+      if (prevDay) renderPrevCompare(machines, lastScores, prevDay, window.__slotAtspecs);
+      else logStrong('(前日データなし: 前日比較はスキップ)', '#fc6');
+    }
 
     var payload = JSON.stringify({
       ver: 1,
@@ -1095,7 +1163,7 @@
     });
     var uploaded = false;
     try {
-      uploaded = await ghUpload(payload, date);
+      uploaded = await ghUpload(payload, date, isToday ? '' : '(後追い収集)');
     } catch (eU) {
       if (String(eU.message).indexOf('401') !== -1) {
         log('サイト自動アップ失敗: トークンが無効です。上部の「設定」から登録し直してください');
@@ -1126,14 +1194,22 @@
         }
       }
     }
-    if (!uploaded && !gasUrl) {
+    if (!uploaded && !gasUrl && isToday) {
       log('自動アップ未設定のためコピー画面を表示します');
       showJsonCopy(payload);
     }
-    log('== 完了。「中止/閉じる」で閉じてください ==');
+    if (isToday) {
+      log('== 完了。「中止/閉じる」で閉じるか、下のボタンで収集を続けられます ==');
+      offerFollowups();
+      scheduleAutoRepeat();
+    }
+    return validCount;
   } catch (e) {
     log('エラー: ' + e.message);
   } finally {
-    window.__slotCollectorRunning = false;
+    if (!autoRepeatMin && !backfillActive) window.__slotCollectorRunning = false;
   }
+  }
+
+  runCollection();
 })();
