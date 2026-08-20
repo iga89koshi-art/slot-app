@@ -329,6 +329,21 @@
         });
         res.marks.push({ label: c.label, text: kp + '回', dir: kp >= 1 ? 1 : 0 });
         if (c.probs) res.extra.push({ k: kp, n: m.totalStart, probs: c.probs });
+      } else if (c.type === 'bigRowRate') {
+        // 連チャンminPosセット目以降で、1信号の獲得枚がthreshold以上(=ハラキリ級の大量上乗せセット)の割合。
+        // すろらぼ実戦: ヴヴヴ2ドライブ率 全6 17.8% vs 低設定7.8%(ATセット単位)
+        var histB = (m.history || []).slice().sort(function (a, b) { return a.no - b.no; });
+        var posB = 0, kb2 = 0, nb2 = 0;
+        histB.forEach(function (h) {
+          if (posB === 0 || h.start > 33) posB = 1; else posB++;
+          if (posB >= (c.minPos || 4)) { nb2++; if ((h.dedama || 0) >= c.threshold) kb2++; }
+        });
+        if (nb2 >= 5) {
+          var shb = kb2 / nb2;
+          res.marks.push({ label: c.label, text: kb2 + '/' + nb2,
+            dir: c.probs ? (shb >= (c.probs['6'] + c.probs['1' in c.probs ? '1' : '2']) / 2 ? 1 : (kb2 === 0 && nb2 >= 12 ? -1 : 0)) : 0 });
+          if (c.probs) res.extra.push({ k: kb2, n: nb2, probs: c.probs });
+        }
       } else if (c.type === 'parity') {
         if (!sets.length) return;
         var ke = sets.filter(function (s) { return Math.floor(s.firstStart / 100) % 2 === 0; }).length;
