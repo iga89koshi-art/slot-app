@@ -560,6 +560,22 @@
     });
     if (!pa.length) logStrong('(対象データなし)', '#0cf');
 
+    // 出玉挙動の上位: 初当り確率に設定差がほぼ無い機種(ヴァルヴ等)はp56で浮上できないため、ここで必ず拾う
+    var hot = machines.map(function (m) { return { m: m, b: behaviorOf(m) }; })
+      .filter(function (x) { return x.b && x.b.sum >= 2000; })
+      .sort(function (a, b) { return b.b.ratio - a.b.ratio; })
+      .slice(0, 10);
+    if (hot.length) {
+      logStrong('== 💥出玉挙動 上位(高設定or事故。設定差の小さい機種はここで判断) ==', '#f6f');
+      hot.forEach(function (x) {
+        var s = scores[x.m.daiban];
+        logStrong((isHotBehavior(x.b) ? '💥' : '　') + ' 台' + x.m.daiban + ' ' + shortName(x.m) +
+          ' G' + x.m.totalStart + ' Σ獲得' + x.b.sum + '枚(' + x.b.ratio.toFixed(1) + '/G)' +
+          (s && s.p56 != null ? ' 高設定' + Math.round(s.p56 * 100) + '%' : '') +
+          marksText(s && s.marks), '#f6f');
+      });
+    }
+
     var at = machines.filter(function (m) { return scores[m.daiban] && scores[m.daiban].kind === 'z'; })
       .sort(function (a, b) { return scores[b.daiban].z - scores[a.daiban].z; });
     var atTop = at.filter(function (m) { return scores[m.daiban].z >= 1; }).slice(0, 8);
@@ -672,7 +688,18 @@
   }
 
   // 好調判定: スペックあり機種は高設定確率40%以上、スペックなしは初当りz値1.0以上
+  // 出玉挙動(Σ獲得枚とG数あたり獲得)。設定差の小さい出玉型機種(ヴァルヴ等)を拾うための補助シグナル
+  function behaviorOf(m) {
+    if (!m.totalStart || m.totalStart < MIN_GAMES_RANK || !m.history || !m.history.length) return null;
+    var sum = 0;
+    m.history.forEach(function (h) { sum += (h.dedama || 0); });
+    return { sum: sum, ratio: sum / m.totalStart };
+  }
+  // 爆発挙動: 2026-08-20実データで較正(全296台中この条件は上位1割弱)
+  function isHotBehavior(b) { return !!b && b.ratio >= 2.5 && b.sum >= 2500; }
+
   function isGood(m, scores) {
+    if (isHotBehavior(behaviorOf(m))) return true;
     var s = scores[m.daiban];
     if (!s) return false;
     if (s.kind === 'z') return s.z >= 1.0;

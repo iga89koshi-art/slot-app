@@ -407,7 +407,17 @@ function computeScores(machines) {
   });
   return scores;
 }
+// 出玉挙動(Σ獲得枚とG数あたり獲得)。設定差の小さい出玉型機種(ヴァルヴ等)を拾うための補助シグナル
+function behaviorOf(m) {
+  if (!m.totalStart || m.totalStart < MIN_GAMES_RANK || !m.history || !m.history.length) return null;
+  var sum = 0;
+  m.history.forEach(function (h) { sum += (h.dedama || 0); });
+  return { sum: sum, ratio: sum / m.totalStart };
+}
+// 爆発挙動: 2026-08-20実データで較正(全296台中この条件は上位1割弱)
+function isHotBehavior(b) { return !!b && b.ratio >= 2.5 && b.sum >= 2500; }
 function isGood(m, scores) {
+  if (isHotBehavior(behaviorOf(m))) return true;
   var s = scores[m.daiban];
   if (!s) return false;
   if (s.kind === 'z') return s.z >= 1.0;
@@ -498,6 +508,23 @@ function render(data, hints) {
         Math.round(s.p456 * 100) + '%'];
     })));
   out.appendChild(sj);
+
+  // 出玉挙動の上位: 初当り確率に設定差がほぼ無い機種(ヴァルヴ等)はp56で浮上できないため、ここで必ず拾う
+  var hot = machines.map(function (m) { return { m: m, b: behaviorOf(m) }; })
+    .filter(function (x) { return x.b && x.b.sum >= 2000; })
+    .sort(function (a, b) { return b.b.ratio - a.b.ratio; })
+    .slice(0, 10);
+  if (hot.length) {
+    var sh = section('h-hot', '💥出玉挙動 上位(高設定or事故。設定差の小さい機種はここで判断)');
+    sh.appendChild(table(['', '台', '機種', 'G数', 'Σ獲得', '獲得/G', '設5以上'],
+      hot.map(function (x) {
+        var s = scores[x.m.daiban];
+        return [isHotBehavior(x.b) ? '💥' : '', x.m.daiban, shortName(x.m), x.m.totalStart,
+          x.b.sum + '枚', { text: x.b.ratio.toFixed(1), cls: isHotBehavior(x.b) ? 'hot' : '' },
+          s && s.p56 != null ? Math.round(s.p56 * 100) + '%' : '-'];
+      })));
+    out.appendChild(sh);
+  }
 
   // AT機(すろらぼ基準の設定推測)
   var pa = machines.filter(function (m) { return scores[m.daiban] && scores[m.daiban].kind === 'pa'; })
