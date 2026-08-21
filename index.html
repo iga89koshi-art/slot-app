@@ -32,6 +32,7 @@
   .warm { color: #ffd866; }
   .mark { font-weight: bold; }
   .note { color: #8b949e; font-size: 12px; }
+  .sech { font-weight: bold; margin-top: 8px; }
   ul { padding-left: 18px; margin: 6px 0; }
   details { background: #161b22; border: 1px solid #2d333b; border-radius: 10px; padding: 10px; }
   textarea { width: 100%; height: 120px; background: #0d1117; color: #e6edf3; border: 1px solid #444c56; border-radius: 8px; margin: 8px 0; }
@@ -67,6 +68,11 @@
   <details id="dailyBox">
     <summary>日別の答え合わせ(全台系・高設定候補の履歴)</summary>
     <div id="dailyOut" class="note">開くと各日の最終データを読み込んで集計します...</div>
+  </details>
+  <p></p>
+  <details id="kuseBox">
+    <summary>🎯 店のくせ読み(晒し屋アーカイブ)</summary>
+    <div id="kuseOut" class="note">読み込み中...</div>
   </details>
   <p></p>
   <details>
@@ -892,6 +898,68 @@ fetch('collect/atspecs.json', { cache: 'no-store' }).then(function (r) { return 
     else document.getElementById('out').textContent = 'データがまだありません';
   })
   .catch(function (e) { document.getElementById('out').textContent = 'データ一覧の読み込み失敗: ' + e.message; });
+
+// 店のくせ読み(晒し屋アーカイブ): data/kuse/events.json を表示
+fetch('data/kuse/events.json', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (kuse) {
+  var out = document.getElementById('kuseOut');
+  out.textContent = '';
+  var today = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+  var evs = (kuse.events || []).slice().sort(function (a, b) { return a.date < b.date ? 1 : -1; });
+  // 今日のヒント
+  evs.forEach(function (ev) {
+    if (ev.date !== today || !(ev.hints || []).length) return;
+    var box = el('div', 'sec');
+    box.style.cssText = 'border:1px solid #d29922;border-radius:8px;padding:8px;margin:6px 0;';
+    box.appendChild(el('div', 'sech', '📣 今日(' + ev.date + ' ' + (ev.event_names || []).join('/') + ')のヒント'));
+    ev.hints.forEach(function (h) {
+      box.appendChild(el('div', 'note', '[' + h.source + '] ' + (h.osusume ? 'オススメ:' + h.osusume.join(',') + ' / ' : '') + (h.signals || []).join(' / ')));
+    });
+    out.appendChild(box);
+  });
+  // 全台系実績の集計
+  var cnt = {};
+  evs.forEach(function (ev) {
+    (ev.results || []).forEach(function (r) {
+      (r.zen || []).forEach(function (m) { cnt[m] = (cnt[m] || 0) + 1; });
+      (r.zenkei || []).forEach(function (m) { m = m.replace(/\(.*\)/, ''); cnt[m] = (cnt[m] || 0) + 1; });
+    });
+  });
+  var rank = Object.keys(cnt).sort(function (a, b) { return cnt[b] - cnt[a]; });
+  if (rank.length) {
+    out.appendChild(el('div', 'sech', '全/全台系に使われた機種(回数)'));
+    out.appendChild(el('div', 'note', rank.map(function (m) { return m + '×' + cnt[m]; }).join(' / ')));
+  }
+  // イベント日別アーカイブ
+  out.appendChild(el('div', 'sech', 'イベント日別'));
+  evs.forEach(function (ev) {
+    var lines = [];
+    (ev.results || []).forEach(function (r) {
+      if (r.note) { lines.push('※' + r.note); return; }
+      var s = [];
+      if (r.zen && r.zen.length) s.push('全:' + r.zen.join(','));
+      if (r.zenkei && r.zenkei.length) s.push('全系:' + r.zenkei.join(','));
+      if (r.half && r.half.length) s.push('1/2:' + r.half.join(','));
+      if (r.third && r.third.length) s.push('1/3:' + r.third.join(','));
+      (r.narabi || []).forEach(function (n) { s.push(n.len + '台並び:' + n.machines.join(',')); });
+      if (r.lottery) s.push('抽選' + r.lottery + '人');
+      if (r.kakutei) s.push('確定:' + r.kakutei.join(','));
+      lines.push('[結果/' + r.source + '] ' + s.join(' | '));
+      if (r.memo) lines.push('memo: ' + r.memo);
+    });
+    (ev.hints || []).forEach(function (h) {
+      lines.push('[前日ヒント/' + h.source + '] ' + (h.osusume ? 'オススメ:' + h.osusume.join(',') + ' / ' : '') + (h.signals || []).join(' / '));
+    });
+    if (!lines.length) return;
+    var d = el('div', 'sec');
+    d.style.cssText = 'margin:6px 0;';
+    d.appendChild(el('div', '', ev.date + ' ' + (ev.event_names || []).join('/')));
+    lines.forEach(function (t) { d.appendChild(el('div', 'note', t)); });
+    out.appendChild(d);
+  });
+}).catch(function (e) {
+  var out = document.getElementById('kuseOut');
+  if (out) out.textContent = 'くせ読みデータの読み込み失敗: ' + e.message;
+});
 
 document.getElementById('pasteBtn').onclick = function () {
   try {
